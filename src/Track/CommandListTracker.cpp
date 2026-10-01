@@ -233,13 +233,10 @@ private:
             return;
         std::vector<std::shared_ptr<void>> drop;
         drop.swap(s->attachments);
-        s->tlasProducedValid = false;
-        s->tlasProduced = TlasInfo{};
-        s->tlasConsumedValid = false;
-        s->tlasConsumed = TlasInfo{};
-        s->log.clear();
-        s->observed.clear();
+        // Forget everything: a new list may be created at this address.
+        s->ResetForRecording(nullptr);
         s->sawReset = false;
+        s->watched = false; // the next list at this address gets its own watch
         // `drop` is released here (outside any lock): GPU-lifetime batches hold their own copies.
     }
 
@@ -247,10 +244,26 @@ private:
     ID3D12CommandList* m_list;
 };
 
+// Attaches a destruction watch to the list currently living at this state's address (the first
+// list there, or a new one created after the previous one was destroyed).
+static void Watch(ListState& s, ID3D12GraphicsCommandList* list)
+{
+    s.type = list->GetType();
+    s.watched = true;
+    // The runtime AddRefs the watch and releases it when the list is destroyed.
+    ListDeathWatch* watch = new ListDeathWatch(list);
+    list->SetPrivateDataInterface(kListWatchGuid, watch);
+    watch->Release();
+}
+
 ListState* GetListState(ID3D12GraphicsCommandList* list)
 {
     if (list == t_cachedList)
+    {
+        if (!t_cachedState->watched)
+            Watch(*t_cachedState, list);
         return t_cachedState;
+    }
 
     ListState* s = FindListState(list);
     if (s == nullptr)
@@ -263,14 +276,9 @@ ListState* GetListState(ID3D12GraphicsCommandList* list)
         auto [it, inserted] = g_lists->emplace(list, std::move(fresh));
         s = it->second.get();
         ReleaseSRWLockExclusive(&g_listLock);
-        if (inserted)
-        {
-            // The runtime AddRefs the watch and releases it when the list is destroyed.
-            ListDeathWatch* watch = new ListDeathWatch(list);
-            list->SetPrivateDataInterface(kListWatchGuid, watch);
-            watch->Release();
-        }
     }
+    if (!s->watched)
+        Watch(*s, list);
     t_cachedList = list;
     t_cachedState = s;
     return s;

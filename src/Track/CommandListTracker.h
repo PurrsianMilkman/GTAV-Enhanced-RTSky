@@ -106,6 +106,8 @@ struct ListState
     // middle of a recording has an unknown root / heap state that RestoreState could not restore,
     // so RTSky never injects into it before its next Reset.
     bool sawReset = false;
+    // A destruction watch is attached to the list object currently at this address.
+    bool watched = false;
     // Set when the list executed a bundle: root / pipeline state inherited from it is unknown.
     bool stateUnknown = false;
 

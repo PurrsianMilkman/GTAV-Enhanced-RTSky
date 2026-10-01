@@ -33,6 +33,7 @@ int TlasTracker::AcquireCloneSlot(ID3D12Device5* device, UINT64 size)
         slot = static_cast<int>(m_nextClone); // replaced below; the old buffer lives on through its holders
     m_nextClone = (static_cast<uint32_t>(slot) + 1) % kCloneRing;
 
+    ++m_slotGen[slot]; // whatever the slot held before is gone from now on
     if (!allBusy && m_clones[slot] && m_cloneSizes[slot] >= size)
         return slot;
 
@@ -160,9 +161,11 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
                     m_clones[i].Reset();
                     m_cloneHolders[i].reset();
                     m_cloneSizes[i] = 0;
+                    ++m_slotGen[i];
                 }
-                m_latest = TlasInfo{};
-                m_completed = TlasInfo{};
+                for (TlasInfo& h : m_history)
+                    h = TlasInfo{};
+                m_historyCount = 0;
                 m_device = device.Get();
             }
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild = {};
@@ -184,6 +187,8 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
                 render::Lifetime().Attach(state, m_cloneHolders[slot]);
                 info.address = cloneAddress;
                 info.cloneHolder = m_cloneHolders[slot];
+                info.cloneSlot = slot;
+                info.cloneGen = m_slotGen[slot];
             }
             else
             {
@@ -209,16 +214,27 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
 
 void TlasTracker::Publish(const TlasInfo& produced, ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
 {
+    TlasInfo entry = produced;
+    entry.cloneHolder.reset(); // the history must not pin ring slots (see m_history)
+    entry.producerQueue = queue;
+    entry.producerFence = fence;
+    entry.producerFenceValue = value;
+
     AcquireSRWLockExclusive(&m_lock);
-    // Lists can be submitted out of recording order: never go back to an older build.
-    if (produced.buildSerial >= m_latest.buildSerial)
+    // Lists can be submitted out of recording order (and re-executed): keep the history sorted by
+    // build serial, newest first, without duplicates.
+    uint32_t pos = 0;
+    while (pos < m_historyCount && m_history[pos].buildSerial > entry.buildSerial)
+        ++pos;
+    const bool duplicate = pos < m_historyCount && m_history[pos].buildSerial == entry.buildSerial;
+    if (!duplicate && pos < kHistory)
     {
-        if (m_latest.address != 0 && ProducerDone(m_latest))
-            m_completed = m_latest;
-        m_latest = produced;
-        m_latest.producerQueue = queue;
-        m_latest.producerFence = fence;
-        m_latest.producerFenceValue = value;
+        const uint32_t last = m_historyCount < kHistory ? m_historyCount : kHistory - 1;
+        for (uint32_t i = last; i > pos; --i)
+            m_history[i] = m_history[i - 1];
+        m_history[pos] = entry;
+        if (m_historyCount < kHistory)
+            ++m_historyCount;
     }
     ReleaseSRWLockExclusive(&m_lock);
 }
@@ -233,24 +249,22 @@ bool TlasTracker::GetSceneTlas(TlasInfo* out)
 {
     AcquireSRWLockExclusive(&m_lock);
     bool ok = false;
-    if (m_latest.address != 0)
+    for (uint32_t i = 0; i < m_historyCount && !ok; ++i)
     {
-        const bool done = ProducerDone(m_latest);
-        if (done)
-            m_completed = m_latest;
+        const TlasInfo& h = m_history[i];
+        // The slot was rewritten (or reallocated) since: that clone no longer exists.
+        if (h.cloneSlot >= 0 && m_slotGen[h.cloneSlot] != h.cloneGen)
+            continue;
         // A clone still being produced is only safe on the queue that will run the consumer (same
         // queue = submission order). Waiting on another queue's fence could deadlock with the
-        // game's own cross-queue waits, so otherwise the newest COMPLETED clone is used.
-        if (done || (m_latest.producerQueue != nullptr && m_latest.producerQueue == m_consumerQueue))
+        // game's own cross-queue waits, so otherwise only completed clones qualify.
+        if (ProducerDone(h) || (h.producerQueue != nullptr && h.producerQueue == m_consumerQueue))
         {
-            *out = m_latest;
+            *out = h;
+            if (h.cloneSlot >= 0)
+                out->cloneHolder = m_cloneHolders[h.cloneSlot]; // busy again while the consumer runs
             ok = true;
         }
-    }
-    if (!ok && m_completed.address != 0)
-    {
-        *out = m_completed;
-        ok = true;
     }
     ReleaseSRWLockExclusive(&m_lock);
     return ok;

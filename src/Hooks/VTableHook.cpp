@@ -144,6 +144,9 @@ void* VTableHook::OriginalSlow(void** vtable, uint32_t slot) const
         if (m_tables[i].vtable == vtable)
             return m_tables[i].originals[slot];
     }
+    // Table full: fall back lock-free (no lock on every call through an unknown vtable).
+    if (count >= kMaxTables)
+        return m_tables[0].originals[slot];
     return const_cast<VTableHook*>(this)->Adopt(vtable, slot);
 }
 
@@ -166,6 +169,7 @@ void* VTableHook::Adopt(void** vtable, uint32_t slot)
     {
         Table& table = m_tables[count];
         table.vtable = vtable;
+        table.adopted = true;
         for (const auto& [s, hook] : m_hooks)
         {
             void* current = vtable[s];
@@ -193,6 +197,8 @@ void VTableHook::Verify()
     for (uint32_t i = 0; i < count; ++i)
     {
         Table& table = m_tables[i];
+        if (table.adopted)
+            continue;
         for (const auto& [slot, hook] : m_hooks)
         {
             void* current = table.vtable[slot];
@@ -224,6 +230,8 @@ void VTableHook::Unpatch()
     for (uint32_t i = 0; i < count; ++i)
     {
         Table& table = m_tables[i];
+        if (table.adopted)
+            continue;
         for (const auto& [slot, hook] : m_hooks)
         {
             if (table.vtable[slot] == hook && table.originals[slot] != nullptr)

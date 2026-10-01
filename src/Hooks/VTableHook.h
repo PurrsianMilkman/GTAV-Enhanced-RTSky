@@ -72,6 +72,9 @@ private:
         void** vtable = nullptr;
         void* originals[kMaxSlots] = {};
         bool chained[kMaxSlots] = {};
+        // Adopted (not patched by RTSky): possibly a per-object heap copy that dies with its object,
+        // so Verify / Unpatch never write into it.
+        bool adopted = false;
     };
 
     void* OriginalSlow(void** vtable, uint32_t slot) const;
