@@ -153,3 +153,14 @@ endif()
 
 install(TARGETS RTSky RUNTIME DESTINATION . LIBRARY DESTINATION .)
 install(FILES config/RTSky.ini DESTINATION .)
+
+# -------------------------------------------------------------------------------------------------
+# Host-side tests of the platform independent math (camera basis, sun orbit, weather)
+# -------------------------------------------------------------------------------------------------
+option(RTSKY_BUILD_TESTS "Build the math tests" OFF)
+if(RTSKY_BUILD_TESTS)
+    enable_testing()
+    add_executable(RTSkyMathTests tests/MathTests.cpp src/Game/SunModel.cpp src/Game/Weather.cpp)
+    target_include_directories(RTSkyMathTests PRIVATE src)
+    add_test(NAME RTSkyMathTests COMMAND RTSkyMathTests)
+endif()

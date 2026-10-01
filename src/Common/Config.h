@@ -68,6 +68,7 @@ struct Config
     DepthModeSetting depthMode = DepthModeSetting::Auto;
     float fovScale = 1.0f;
     bool calibrationProbe = true;
+    float minCalibrationScore = 0.35f; // relighting starts once the probe agrees this well
 
     // [Detection]
     int gbufferOrdinal = -1;       // -1 auto, else ordinal of the MRT binding in its command list
