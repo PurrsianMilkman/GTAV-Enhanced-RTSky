@@ -110,7 +110,7 @@ struct FrameConstants
     float4 compositeParams;  // x = strength, y = min ratio, z = max ratio, w = game sky occlusion assumption
     float4 compositeParams2; // x = direct scale, y = artificial ambient (solar units), z = ground albedo, w = emissive threshold
     float4 compositeParams3; // x = global fade [0,1], y = near fade distance (m), z = debug view, w = HDR target is sRGB-encoded (1) or linear (0)
-    float4 compositeParams4; // x = distance fade start (m), y = distance fade end (m), zw 0
+    float4 compositeParams4; // x = distance fade start (m), y = distance fade end (m), z = split compare (1), w 0
 
     // --- calibration probe: 8 hypothesis cameras ---
     // probeCam[h*4+0].xyz = hypothesis camera offset relative to the CURRENT camera position,

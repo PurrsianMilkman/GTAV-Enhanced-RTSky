@@ -12,6 +12,11 @@
 #include "../Track/CommandListTracker.h"
 
 #include <string>
+#include <vector>
+
+namespace rtsky {
+struct Config;
+}
 
 namespace rtsky::render {
 
@@ -30,5 +35,15 @@ std::string RendererStatus();
 
 // Requests a history reset (camera cut, config reload).
 void ResetHistory();
+
+// "off", "1 sky visibility", ... for the debug views (RTSKY_VIEW_*).
+const char* DebugViewName(int view);
+
+// Forgets the camera / TLAS-space calibration (hotkey).
+void ResetCalibration();
+
+// Status lines for the on-screen overlay: a one-line verdict (what RTSky is doing, or the first
+// thing stopping it), then details.
+std::vector<std::string> OverlayLines(const Config& cfg);
 
 } // namespace rtsky::render

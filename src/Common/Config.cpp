@@ -71,6 +71,35 @@ bool ParseIni(const std::wstring& path, IniMap& out)
     return true;
 }
 
+int ParseKey(const std::string& text)
+{
+    const std::string l = Lower(Trim(text));
+    if (l.empty())
+        return 0;
+    if (std::isdigit(static_cast<unsigned char>(l[0])))
+        return static_cast<int>(std::strtol(l.c_str(), nullptr, 0));
+    static const struct
+    {
+        const char* name;
+        int vk;
+    } kNames[] = {
+        { "numpad0", 0x60 }, { "numpad1", 0x61 }, { "numpad2", 0x62 }, { "numpad3", 0x63 }, { "numpad4", 0x64 },
+        { "numpad5", 0x65 }, { "numpad6", 0x66 }, { "numpad7", 0x67 }, { "numpad8", 0x68 }, { "numpad9", 0x69 },
+        { "numpadmultiply", 0x6A }, { "numpadadd", 0x6B }, { "numpadsubtract", 0x6D }, { "numpaddecimal", 0x6E },
+        { "numpaddivide", 0x6F }, { "f1", 0x70 }, { "f2", 0x71 }, { "f3", 0x72 }, { "f4", 0x73 }, { "f5", 0x74 },
+        { "f6", 0x75 }, { "f7", 0x76 }, { "f8", 0x77 }, { "f9", 0x78 }, { "f10", 0x79 }, { "f11", 0x7A }, { "f12", 0x7B },
+        { "insert", 0x2D }, { "delete", 0x2E }, { "home", 0x24 }, { "end", 0x23 }, { "pageup", 0x21 }, { "pagedown", 0x22 },
+        { "none", -1 },
+    };
+    for (const auto& n : kNames)
+    {
+        if (l == n.name)
+            return n.vk;
+    }
+    LOG_WARN("Unknown key name '%s' in RTSky.ini", text.c_str());
+    return 0;
+}
+
 class Reader
 {
 public:
@@ -105,6 +134,16 @@ public:
                 v = parsed;
         }
     }
+    // Virtual-key code: a number (0x61) or a name (Numpad1, NumpadAdd, F10, ...).
+    void GetKey(const char* key, int& v) const
+    {
+        const std::string* s = Find(key);
+        if (s == nullptr)
+            return;
+        const int parsed = ParseKey(*s);
+        if (parsed != 0)
+            v = parsed; // -1 ("none") disables the key
+    }
     // "auto" -> autoValue, otherwise integer
     void GetAutoInt(const char* key, int& v, int autoValue) const
     {
@@ -133,10 +172,24 @@ bool Config::Load(const std::wstring& path)
     r.Get("general.enabled", enabled);
     r.Get("general.loglevel", logLevel);
 
-    r.Get("hotkeys.toggle", keyToggle);
-    r.Get("hotkeys.debugview", keyDebugView);
-    r.Get("hotkeys.reload", keyReload);
-    r.Get("hotkeys.dumpframe", keyDumpFrame);
+    r.GetKey("hotkeys.toggle", keyToggle);
+    r.GetKey("hotkeys.overlay", keyOverlay);
+    r.GetKey("hotkeys.compare", keyCompare);
+    r.GetKey("hotkeys.forcerelight", keyForceRelight);
+    r.GetKey("hotkeys.debugview", keyDebugView);
+    r.GetKey("hotkeys.sunshadows", keySunShadows);
+    r.GetKey("hotkeys.foliage", keyFoliage);
+    r.GetKey("hotkeys.nearfield", keyNearField);
+    r.GetKey("hotkeys.tracepath", keyTracePath);
+    r.GetKey("hotkeys.reload", keyReload);
+    r.GetKey("hotkeys.dumpframe", keyDumpFrame);
+    r.GetKey("hotkeys.strengthup", keyStrengthUp);
+    r.GetKey("hotkeys.strengthdown", keyStrengthDown);
+    r.GetKey("hotkeys.denoiser", keyDenoiser);
+    r.GetKey("hotkeys.reset", keyReset);
+
+    r.Get("display.overlay", overlay);
+    r.Get("display.compare", compareSplit);
 
     if (const std::string* s = r.Find("trace.path"))
         tracePath = Lower(*s) == "inline" ? TracePath::Inline : TracePath::Pipeline;
@@ -196,6 +249,7 @@ bool Config::Load(const std::wstring& path)
     r.Get("camera.fovscale", fovScale);
     r.Get("camera.calibrationprobe", calibrationProbe);
     r.Get("camera.mincalibrationscore", minCalibrationScore);
+    r.Get("camera.forcerelight", forceRelight);
 
     r.GetAutoInt("detection.gbufferordinal", gbufferOrdinal, -1);
     r.Get("detection.compositecandidate", compositeCandidate);
@@ -296,6 +350,15 @@ void SetConfigEnabled(bool enabled)
     AcquireSRWLockExclusive(&g_configLock);
     g_config.enabled = enabled;
     ReleaseSRWLockExclusive(&g_configLock);
+}
+
+Config UpdateConfig(const std::function<void(Config&)>& edit)
+{
+    AcquireSRWLockExclusive(&g_configLock);
+    edit(g_config);
+    Config copy = g_config;
+    ReleaseSRWLockExclusive(&g_configLock);
+    return copy;
 }
 
 } // namespace rtsky

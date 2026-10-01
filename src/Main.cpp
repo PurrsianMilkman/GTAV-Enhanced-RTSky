@@ -9,6 +9,7 @@
 #include "Common/Config.h"
 #include "Common/Log.h"
 #include "Game/GameData.h"
+#include "Game/Overlay.h"
 #include "Game/ScriptHookV.h"
 #include "Hooks/D3D12Hooks.h"
 #include "Render/Renderer.h"
@@ -17,8 +18,12 @@
 
 #include "../shaders/RTSkyShared.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -27,7 +32,6 @@ std::wstring g_directory;
 
 // Key presses from ScriptHookV's keyboard handler (window thread) -> script fiber
 std::atomic<int> g_pressedKey{ 0 };
-std::atomic<bool> g_pressedWithCtrl{ false };
 
 std::wstring ModuleDirectory(HMODULE module)
 {
@@ -50,42 +54,159 @@ void OnKeyboard(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUp
 {
     if (isUpNow || wasDownBefore)
         return;
-    g_pressedWithCtrl.store((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
     g_pressedKey.store(static_cast<int>(key));
+}
+
+std::string KeyName(int vk)
+{
+    if (vk >= 0x60 && vk <= 0x69)
+        return "Num" + std::to_string(vk - 0x60);
+    switch (vk)
+    {
+    case 0x6A: return "Num*";
+    case 0x6B: return "Num+";
+    case 0x6D: return "Num-";
+    case 0x6E: return "Num.";
+    case 0x6F: return "Num/";
+    default: break;
+    }
+    if (vk >= 0x70 && vk <= 0x7B)
+        return "F" + std::to_string(vk - 0x6F);
+    if (vk <= 0)
+        return "-";
+    char buf[16];
+    snprintf(buf, sizeof(buf), "0x%02X", vk);
+    return buf;
+}
+
+const char* OnOff(bool v)
+{
+    return v ? "ON" : "off";
+}
+
+void Notify(const std::string& text)
+{
+    rtsky::game::overlay::Toast("RTSky: " + text);
+    LOG_INFO("Hotkey: %s", text.c_str());
 }
 
 void HandleHotkeys()
 {
+    using rtsky::Config;
     const int key = g_pressedKey.exchange(0);
-    if (key == 0)
+    if (key <= 0)
         return;
-    const bool ctrl = g_pressedWithCtrl.load();
-    const rtsky::Config cfg = rtsky::ConfigSnapshot();
+    const Config cfg = rtsky::ConfigSnapshot();
 
-    if (ctrl && key == cfg.keyReload)
+    if (key == cfg.keyToggle)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.enabled = !x.enabled; });
+        rtsky::render::ResetHistory();
+        Notify(c.enabled ? "ON" : "OFF");
+    }
+    else if (key == cfg.keyOverlay)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.overlay = !x.overlay; });
+        Notify(std::string("status overlay ") + OnOff(c.overlay));
+    }
+    else if (key == cfg.keyCompare)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.compareSplit = !x.compareSplit; });
+        Notify(c.compareSplit ? "split compare ON (left: original, right: RTSky)" : "split compare off");
+    }
+    else if (key == cfg.keyForceRelight)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.forceRelight = !x.forceRelight; });
+        Notify(c.forceRelight ? "force relight ON (ignores the calibration)" : "force relight off");
+    }
+    else if (key == cfg.keyDebugView)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.debugView = (x.debugView + 1) % RTSKY_VIEW_COUNT; });
+        Notify(std::string("debug view ") + rtsky::render::DebugViewName(c.debugView));
+    }
+    else if (key == cfg.keySunShadows)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.sunShadowRays = !x.sunShadowRays; });
+        rtsky::render::ResetHistory();
+        Notify(std::string("sun / moon shadow rays ") + OnOff(c.sunShadowRays));
+    }
+    else if (key == cfg.keyFoliage)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) {
+            x.foliageMode = x.foliageMode == rtsky::FoliageMode::Stochastic ? rtsky::FoliageMode::Opaque
+                          : x.foliageMode == rtsky::FoliageMode::Opaque     ? rtsky::FoliageMode::Ignore
+                                                                            : rtsky::FoliageMode::Stochastic;
+        });
+        rtsky::render::ResetHistory();
+        Notify(std::string("foliage ") + (c.foliageMode == rtsky::FoliageMode::Opaque   ? "opaque"
+                                          : c.foliageMode == rtsky::FoliageMode::Ignore ? "ignored"
+                                                                                        : "stochastic"));
+    }
+    else if (key == cfg.keyNearField)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.nearField = !x.nearField; });
+        rtsky::render::ResetHistory();
+        Notify(std::string("near-field split ") + OnOff(c.nearField));
+    }
+    else if (key == cfg.keyTracePath)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) {
+            x.tracePath = x.tracePath == rtsky::TracePath::Pipeline ? rtsky::TracePath::Inline : rtsky::TracePath::Pipeline;
+        });
+        rtsky::render::ResetHistory();
+        Notify(c.tracePath == rtsky::TracePath::Pipeline ? "trace path: DXR pipeline" : "trace path: inline RayQuery");
+    }
+    else if (key == cfg.keyReload)
     {
         rtsky::ReloadConfig();
         ApplyConfig();
         rtsky::render::ResetHistory();
-        LOG_INFO("Configuration reloaded");
+        Notify("RTSky.ini reloaded");
     }
-    else if (ctrl && key == cfg.keyDumpFrame)
+    else if (key == cfg.keyDumpFrame)
     {
         rtsky::track::Analyzer().RequestDump(g_directory + L"RTSky_frame.log");
-        LOG_INFO("Frame dump requested");
+        Notify("frame dump requested (RTSky_frame.log)");
     }
-    else if (!ctrl && key == cfg.keyToggle)
+    else if (key == cfg.keyStrengthUp || key == cfg.keyStrengthDown)
     {
-        rtsky::SetConfigEnabled(!cfg.enabled);
+        const float step = key == cfg.keyStrengthUp ? 0.1f : -0.1f;
+        const Config c = rtsky::UpdateConfig([step](Config& x) {
+            x.strength = std::round(std::clamp(x.strength + step, 0.0f, 1.0f) * 100.0f) / 100.0f;
+        });
+        char buf[64];
+        snprintf(buf, sizeof(buf), "strength %.2f", c.strength);
+        Notify(buf);
+    }
+    else if (key == cfg.keyDenoiser)
+    {
+        const Config c = rtsky::UpdateConfig([](Config& x) { x.denoiser = !x.denoiser; });
+        Notify(std::string("spatial denoiser ") + OnOff(c.denoiser));
+    }
+    else if (key == cfg.keyReset)
+    {
         rtsky::render::ResetHistory();
-        LOG_INFO("RTSky %s", cfg.enabled ? "disabled" : "enabled");
+        rtsky::render::ResetCalibration();
+        Notify("history and calibration reset");
     }
-    else if (!ctrl && key == cfg.keyDebugView)
+}
+
+// Status overlay: the renderer's lines plus the key legend.
+void DrawOverlay(const rtsky::Config& cfg)
+{
+    std::vector<std::string> lines;
+    if (cfg.overlay)
     {
-        const int view = (cfg.debugView + 1) % RTSKY_VIEW_COUNT;
-        rtsky::SetConfigDebugView(view);
-        LOG_INFO("Debug view %d", view);
+        lines = rtsky::render::OverlayLines(cfg);
+        lines.push_back("Keys: " + KeyName(cfg.keyToggle) + " on/off  " + KeyName(cfg.keyOverlay) + " overlay  " +
+                        KeyName(cfg.keyCompare) + " compare  " + KeyName(cfg.keyForceRelight) + " force  " + KeyName(cfg.keyDebugView) +
+                        " view  " + KeyName(cfg.keySunShadows) + " sun  " + KeyName(cfg.keyFoliage) + " foliage");
+        lines.push_back("      " + KeyName(cfg.keyNearField) + " near-field  " + KeyName(cfg.keyTracePath) + " path  " +
+                        KeyName(cfg.keyReload) + " reload  " + KeyName(cfg.keyDumpFrame) + " dump  " + KeyName(cfg.keyStrengthUp) +
+                        "/" + KeyName(cfg.keyStrengthDown) + " strength  " + KeyName(cfg.keyDenoiser) + " denoise  " +
+                        KeyName(cfg.keyReset) + " reset   (NumLock on)");
     }
+    rtsky::game::overlay::Draw(lines);
 }
 
 void ScriptMain()
@@ -108,6 +229,7 @@ void ScriptMain()
         }
 
         HandleHotkeys();
+        DrawOverlay(rtsky::ConfigSnapshot());
         rtsky::render::OnScriptTick();
         rtsky::game::SHV().ScriptWait(0);
     }

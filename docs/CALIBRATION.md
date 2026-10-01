@@ -28,7 +28,7 @@ RTSky works out the frame from the order the game submits its work in:
   target of the same size. RTSky relights this target when the pass ends, before fog, sky,
   transparents and post-processing.
 
-Press **Ctrl+F11** to write one frame of submitted passes to `RTSky_frame.log`, in GPU order:
+Press **Num .** to write one frame of submitted passes to `RTSky_frame.log`, in GPU order:
 
 ```
 ---- list 0000020F... (queue 0000020E...): 2311 draws, 1 TLAS builds, 140 BLAS builds, 0 DispatchRays
@@ -90,7 +90,8 @@ typical; foliage and level-of-detail differences between the raster and RT geome
 
 If every score stays low:
 
-1. Open **debug view 6** (F11 x6). Green pixels are where the BVH lines up with the screen.
+1. Open **debug view 6** (Num 5 six times). Green pixels are where the BVH lines up with the screen.
+   **Num 4** (force relight) shows the relighting anyway, aligned or not.
 2. Everything red with a constant offset suggests a wrong `TlasSpace`. Red that grows with distance
    suggests a wrong `DepthMode` (try `reversed_infinite` or `standard`). Red that grows towards the
    screen edges suggests a wrong FOV (`FovScale`).
