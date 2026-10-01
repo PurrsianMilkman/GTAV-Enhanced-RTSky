@@ -26,6 +26,12 @@ public:
     int TlasSpace() const;    // 0 world, 1 camera-relative
     float Confidence() const; // score of the chosen hypothesis [0,1]
     bool HasData() const;
+    // The same for a given hypothesis (the one actually rendered with when a value is pinned).
+    float Confidence(int latency, int space) const;
+    bool HasData(int latency, int space) const;
+    // Best value of one dimension when the other one is pinned in the INI.
+    int BestSpaceFor(int latency) const;
+    int BestLatencyFor(int space) const;
     std::string Describe() const;
 
 private:

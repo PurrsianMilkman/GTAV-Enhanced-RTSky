@@ -6,6 +6,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: DirectX-Headers
+        run: git clone --depth 1 --branch v1.619.5 https://github.com/microsoft/DirectX-Headers.git dxh
+
+      - name: Configure
+        run: cmake -S tests -B build-tests -DRTSKY_DIRECTX_HEADERS_DIR=$PWD/dxh
+
+      - name: Build
+        run: cmake --build build-tests
+
+      - name: Math and frame-analyzer tests
+        run: ctest --test-dir build-tests --output-on-failure
+
   windows-msvc:
     runs-on: windows-latest
     steps:

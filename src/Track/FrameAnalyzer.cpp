@@ -204,6 +204,9 @@ void FrameAnalyzer::OnExecute(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     ReleaseSRWLockExclusive(&m_lock);
 }
 
+// More G-buffer bindings than this in one phase: no HDR pass separates the frames any more.
+static constexpr uint32_t kStalledPhaseBindings = 64;
+
 void FrameAnalyzer::Analyze(bool forceDump)
 {
     // 1. G-buffer: MRT signature with the most draws.
@@ -211,7 +214,6 @@ void FrameAnalyzer::Analyze(bool forceDump)
     {
         BindingSignature sig;
         uint64_t draws = 0;
-        std::map<int32_t, uint32_t> ordinals;
         float clearDepth = 0.0f;
         bool clearKnown = false;
     };
@@ -236,7 +238,6 @@ void FrameAnalyzer::Analyze(bool forceDump)
             g = &groups.back();
         }
         g->draws += r.draws;
-        ++g->ordinals[r.mrtOrdinal];
     }
 
     if (groups.empty())
@@ -258,20 +259,6 @@ void FrameAnalyzer::Analyze(bool forceDump)
         if (g.draws > best->draws)
             best = &g;
     }
-    int32_t gOrdinal = m_gbufferOrdinalOverride;
-    if (gOrdinal < 0)
-    {
-        uint32_t bestCount = 0;
-        for (const auto& [ordinal, n] : best->ordinals)
-        {
-            if (n > bestCount)
-            {
-                bestCount = n;
-                gOrdinal = ordinal;
-            }
-        }
-    }
-
     // Depth clear value of the G-buffer's depth (reversed-Z detection)
     bool clearKnown = false;
     float clearValue = 0.0f;
@@ -284,52 +271,161 @@ void FrameAnalyzer::Analyze(bool forceDump)
         }
     }
 
-    // 2. Segments between consecutive G-buffer passes
-    std::vector<size_t> occurrences;
+    // 2. G-buffer phases: maximal runs of bindings with the G-buffer signature that are not separated
+    //    by an HDR-candidate binding of G-buffer size. A G-buffer that is re-bound several times
+    //    (opaque, decals, foliage), split across command lists or across suspended render passes
+    //    forms ONE phase, and a frame is one phase plus everything up to the next phase.
+    const UINT64 gW = best->sig.width;
+    const UINT gH = best->sig.height;
+    auto isGbuffer = [&](const BindingRecord& r) { return r.mrtOrdinal >= 0 && best->sig.Matches(r); };
+    auto isHdr = [&](const BindingRecord& r) { return r.hdrOrdinal >= 0 && r.rtv[0].width == gW && r.rtv[0].height == gH; };
+    struct Phase
+    {
+        size_t first = 0;
+        size_t last = 0;
+        uint32_t bindings = 0;
+    };
+    std::vector<Phase> phases;
+    bool hdrSincePhase = true;
     for (size_t i = 0; i < m_window.size(); ++i)
     {
         const BindingRecord& r = m_window[i];
-        if (r.mrtOrdinal == gOrdinal && best->sig.Matches(r))
-            occurrences.push_back(i);
+        if (isGbuffer(r))
+        {
+            if (hdrSincePhase)
+                phases.push_back(Phase{ i, i, 0 });
+            phases.back().last = i;
+            ++phases.back().bindings;
+            hdrSincePhase = false;
+        }
+        else if (isHdr(r))
+        {
+            hdrSincePhase = true;
+        }
     }
-    if (occurrences.size() < 2)
+    // Without HDR passes, consecutive frames merge into one phase (menus and loading screens that
+    // still render a G-buffer but light nothing). A phase that keeps growing means exactly that.
+    if (phases.back().bindings > kStalledPhaseBindings)
+    {
+        if (m_rules.armed)
+        {
+            m_rules.armed = false;
+            m_rules.generation = m_generation.load() + 1;
+            m_generation.store(m_rules.generation, std::memory_order_release);
+            LOG_INFO("Frame analysis: no HDR lighting pass in recent frames, injection disarmed");
+        }
+        m_stableCount = 0;
+        m_status = "G-buffer " + best->sig.ToString() + " without an HDR pass (menu / loading?)";
+        const size_t keepFrom = phases.back().last;
+        m_window.erase(m_window.begin(), m_window.begin() + static_cast<std::ptrdiff_t>(keepFrom));
+        m_markers.clear();
+        return;
+    }
+    if (phases.size() < 2)
     {
         m_status = "G-buffer " + best->sig.ToString() + " found, waiting for a complete frame";
         return;
     }
 
-    const UINT64 gW = best->sig.width;
-    const UINT gH = best->sig.height;
-    int segmentsWithoutHdr = 0;
-    for (size_t k = 0; k + 1 < occurrences.size(); ++k)
+    // 3. Per complete frame: the injection bindings and rules that match each of them exactly once.
+    //    A rule is (signature, ordinal within its list); when that is ambiguous (the same pass
+    //    signature at the same ordinal in two lists), the number of G-buffer (resp. HDR) bindings
+    //    recorded earlier in the same list is added as a discriminator.
+    int framesWithoutHdr = 0;
+    int ambiguousFrames = 0;
+    for (size_t k = 0; k + 1 < phases.size(); ++k)
     {
-        std::vector<const BindingRecord*> candidates;
-        for (size_t i = occurrences[k] + 1; i < occurrences[k + 1]; ++i)
+        const size_t frameBegin = phases[k].first;
+        const size_t frameEnd = phases[k + 1].first;
+
+        // Prepare: the LAST binding of the phase (the depth is complete only there), or the last one
+        // with the configured ordinal.
+        const BindingRecord* g = nullptr;
+        for (size_t i = phases[k].first; i <= phases[k].last; ++i)
         {
             const BindingRecord& r = m_window[i];
-            if (r.hdrOrdinal >= 0 && r.rtv[0].width == gW && r.rtv[0].height == gH)
-                candidates.push_back(&r);
+            if (isGbuffer(r) && (m_gbufferOrdinalOverride < 0 || r.mrtOrdinal == m_gbufferOrdinalOverride))
+                g = &r;
         }
-        if (candidates.size() <= static_cast<size_t>(m_compositeCandidate))
+
+        // Composite: the CompositeCandidate-th HDR binding after the phase (or the one with the
+        // configured ordinal), with its own signature.
+        std::vector<const BindingRecord*> candidates;
+        for (size_t i = phases[k].last + 1; i < frameEnd; ++i)
         {
-            ++segmentsWithoutHdr;
+            if (isHdr(m_window[i]))
+                candidates.push_back(&m_window[i]);
+        }
+        const BindingRecord* h = nullptr;
+        if (m_compositeOrdinalOverride >= 0)
+        {
+            for (const BindingRecord* c : candidates)
+            {
+                if (c->hdrOrdinal == m_compositeOrdinalOverride)
+                {
+                    h = c;
+                    break;
+                }
+            }
+        }
+        else if (candidates.size() > static_cast<size_t>(m_compositeCandidate))
+        {
+            h = candidates[m_compositeCandidate];
+        }
+        if (g == nullptr || h == nullptr)
+        {
+            ++framesWithoutHdr;
             m_stableCount = 0;
             continue;
         }
-        const BindingRecord* pick = candidates[m_compositeCandidate];
-        BindingSignature hdrSig = BindingSignature::From(*pick);
-        int32_t hdrOrdinal = m_compositeOrdinalOverride >= 0 ? m_compositeOrdinalOverride : pick->hdrOrdinal;
 
-        if (hdrSig == m_candHdr && hdrOrdinal == m_candHdrOrdinal && best->sig == m_candGbuffer && gOrdinal == m_candGbufferOrdinal)
+        const BindingSignature gSig = BindingSignature::From(*g);
+        const BindingSignature hSig = BindingSignature::From(*h);
+        auto countIn = [&](auto&& pred) {
+            int n = 0;
+            for (size_t i = frameBegin; i < frameEnd; ++i)
+                n += pred(m_window[i]) ? 1 : 0;
+            return n;
+        };
+        int32_t gDisc = -1;
+        if (countIn([&](const BindingRecord& r) { return r.mrtOrdinal == g->mrtOrdinal && gSig.Matches(r); }) != 1)
+        {
+            gDisc = static_cast<int32_t>(g->hdrBefore);
+            if (countIn([&](const BindingRecord& r) {
+                    return r.mrtOrdinal == g->mrtOrdinal && static_cast<int32_t>(r.hdrBefore) == gDisc && gSig.Matches(r);
+                }) != 1)
+                gDisc = -2;
+        }
+        int32_t hDisc = -1;
+        if (countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); }) != 1)
+        {
+            hDisc = static_cast<int32_t>(h->mrtBefore);
+            if (countIn([&](const BindingRecord& r) {
+                    return r.hdrOrdinal == h->hdrOrdinal && static_cast<int32_t>(r.mrtBefore) == hDisc && hSig.Matches(r);
+                }) != 1)
+                hDisc = -2;
+        }
+        if (gDisc == -2 || hDisc == -2)
+        {
+            // No rule identifies the pass uniquely: injecting could hit the wrong pass (or twice).
+            ++ambiguousFrames;
+            m_stableCount = 0;
+            continue;
+        }
+
+        if (gSig == m_candGbuffer && g->mrtOrdinal == m_candGbufferOrdinal && gDisc == m_candGbufferDisc && hSig == m_candHdr &&
+            h->hdrOrdinal == m_candHdrOrdinal && hDisc == m_candHdrDisc)
         {
             ++m_stableCount;
         }
         else
         {
-            m_candHdr = hdrSig;
-            m_candHdrOrdinal = hdrOrdinal;
-            m_candGbuffer = best->sig;
-            m_candGbufferOrdinal = gOrdinal;
+            m_candGbuffer = gSig;
+            m_candGbufferOrdinal = g->mrtOrdinal;
+            m_candGbufferDisc = gDisc;
+            m_candHdr = hSig;
+            m_candHdrOrdinal = h->hdrOrdinal;
+            m_candHdrDisc = hDisc;
             m_stableCount = 1;
         }
     }
@@ -337,45 +433,55 @@ void FrameAnalyzer::Analyze(bool forceDump)
     if (m_stableCount >= m_stableFrames)
     {
         bool changed = !m_rules.armed || !(m_rules.gbuffer == m_candGbuffer) || m_rules.gbufferOrdinal != m_candGbufferOrdinal ||
-                       !(m_rules.hdr == m_candHdr) || m_rules.hdrOrdinal != m_candHdrOrdinal ||
+                       m_rules.gbufferHdrBefore != m_candGbufferDisc || !(m_rules.hdr == m_candHdr) ||
+                       m_rules.hdrOrdinal != m_candHdrOrdinal || m_rules.hdrMrtBefore != m_candHdrDisc ||
                        m_rules.depthClearKnown != clearKnown || (clearKnown && m_rules.depthClearValue != clearValue);
         if (changed)
         {
             m_rules.armed = true;
             m_rules.gbuffer = m_candGbuffer;
             m_rules.gbufferOrdinal = m_candGbufferOrdinal;
+            m_rules.gbufferHdrBefore = m_candGbufferDisc;
             m_rules.hdr = m_candHdr;
             m_rules.hdrOrdinal = m_candHdrOrdinal;
+            m_rules.hdrMrtBefore = m_candHdrDisc;
             m_rules.depthClearKnown = clearKnown;
             m_rules.depthClearValue = clearValue;
             m_rules.generation = m_generation.load() + 1;
             m_generation.store(m_rules.generation, std::memory_order_release);
-            LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d), HDR lighting = %s (list ordinal %d), depth clear %s%.1f",
-                     m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal, m_rules.hdr.ToString().c_str(),
-                     m_rules.hdrOrdinal, clearKnown ? "" : "unknown ", clearValue);
+            LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (list ordinal %d%s), depth clear %s%.1f",
+                     m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal, m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
+                     m_rules.hdr.ToString().c_str(), m_rules.hdrOrdinal, m_rules.hdrMrtBefore >= 0 ? ", discriminated" : "",
+                     clearKnown ? "" : "unknown ", clearValue);
         }
         m_status = "armed";
     }
-    else if (m_rules.armed && segmentsWithoutHdr > 0 && m_stableCount == 0)
+    else if (m_rules.armed && (framesWithoutHdr > 0 || ambiguousFrames > 0) && m_stableCount == 0)
     {
-        // The frame structure changed (menu, loading screen, settings change): disarm until stable again.
+        // The frame structure changed (menu, loading screen, settings change) or the rules stopped
+        // identifying the passes uniquely: disarm until stable again.
         m_rules.armed = false;
         m_rules.generation = m_generation.load() + 1;
         m_generation.store(m_rules.generation, std::memory_order_release);
         m_status = "frame structure changed, re-analysing";
-        LOG_INFO("Frame analysis: HDR lighting pass not found any more, injection disarmed");
+        LOG_INFO("Frame analysis: %s, injection disarmed",
+                 ambiguousFrames > 0 ? "the passes are no longer identified uniquely" : "HDR lighting pass not found any more");
     }
     else if (!m_rules.armed)
     {
-        m_status = "G-buffer " + best->sig.ToString() + ", HDR pass " +
-                   (m_stableCount > 0 ? "found, stabilising" : "not found (check CompositeCandidate)");
+        if (ambiguousFrames > 0)
+            m_status = "G-buffer " + best->sig.ToString() + ": the G-buffer or HDR pass is not unique per frame "
+                       "(press the frame-dump key and see docs/CALIBRATION.md)";
+        else
+            m_status = "G-buffer " + best->sig.ToString() + ", HDR pass " +
+                       (m_stableCount > 0 ? "found, stabilising" : "not found (check CompositeCandidate)");
     }
 
     if (m_dumpRequested || forceDump)
-        WriteDump(occurrences[occurrences.size() - 2], occurrences.back() + 1, m_rules);
+        WriteDump(phases[phases.size() - 2].first, phases.back().first, m_rules);
 
-    // Keep the incomplete tail segment for the next analysis.
-    const size_t keepFrom = occurrences.back();
+    // Keep the incomplete tail (the last phase and what follows) for the next analysis.
+    const size_t keepFrom = phases.back().first;
     std::vector<ListMarker> keptMarkers;
     for (const ListMarker& m : m_markers)
     {
@@ -419,9 +525,9 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
         const BindingRecord& r = m_window[i];
         fprintf(f, "  #%-3u %-60s draws %-5u", r.listSeq, BindingSignature::From(r).ToString().c_str(), r.draws);
         if (r.mrtOrdinal >= 0)
-            fprintf(f, " mrt#%d", r.mrtOrdinal);
+            fprintf(f, " mrt#%d (after %u hdr)", r.mrtOrdinal, r.hdrBefore);
         if (r.hdrOrdinal >= 0)
-            fprintf(f, " hdr#%d", r.hdrOrdinal);
+            fprintf(f, " hdr#%d (after %u mrt)", r.hdrOrdinal, r.mrtBefore);
         if (r.hasDsv)
             fprintf(f, " dsv%s%s", r.dsvReadOnlyDepth ? " ro-depth" : "", r.dsvReadOnlyStencil ? " ro-stencil" : "");
         if (r.dsvCleared)
@@ -430,9 +536,11 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
             fprintf(f, " vp=%.0f,%.0f %.0fx%.0f", r.viewport.TopLeftX, r.viewport.TopLeftY, r.viewport.Width, r.viewport.Height);
         if (r.fromRenderPass)
             fprintf(f, " renderpass");
-        if (rules.armed && r.mrtOrdinal == rules.gbufferOrdinal && rules.gbuffer.Matches(r))
+        if (rules.armed && r.mrtOrdinal == rules.gbufferOrdinal &&
+            (rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore) && rules.gbuffer.Matches(r))
             fprintf(f, "   <== PREPARE");
-        if (rules.armed && r.hdrOrdinal == rules.hdrOrdinal && rules.hdr.Matches(r))
+        if (rules.armed && r.hdrOrdinal == rules.hdrOrdinal &&
+            (rules.hdrMrtBefore < 0 || static_cast<int32_t>(r.mrtBefore) == rules.hdrMrtBefore) && rules.hdr.Matches(r))
             fprintf(f, "   <== COMPOSITE");
         fprintf(f, "\n");
     }
@@ -458,7 +566,8 @@ bool FrameAnalyzer::MatchPrepare(const ListState& s, const BindingRecord& r) con
     if (s.type != D3D12_COMMAND_LIST_TYPE_DIRECT || r.mrtOrdinal < 0)
         return false;
     const InjectionRules& rules = CachedRules();
-    return rules.armed && r.mrtOrdinal == rules.gbufferOrdinal && rules.gbuffer.Matches(r);
+    return rules.armed && r.mrtOrdinal == rules.gbufferOrdinal &&
+           (rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore) && rules.gbuffer.Matches(r);
 }
 
 bool FrameAnalyzer::MatchComposite(const ListState& s, const BindingRecord& r) const
@@ -466,7 +575,8 @@ bool FrameAnalyzer::MatchComposite(const ListState& s, const BindingRecord& r) c
     if (s.type != D3D12_COMMAND_LIST_TYPE_DIRECT || r.hdrOrdinal < 0)
         return false;
     const InjectionRules& rules = CachedRules();
-    return rules.armed && r.hdrOrdinal == rules.hdrOrdinal && rules.hdr.Matches(r);
+    return rules.armed && r.hdrOrdinal == rules.hdrOrdinal &&
+           (rules.hdrMrtBefore < 0 || static_cast<int32_t>(r.mrtBefore) == rules.hdrMrtBefore) && rules.hdr.Matches(r);
 }
 
 InjectionRules FrameAnalyzer::Rules() const

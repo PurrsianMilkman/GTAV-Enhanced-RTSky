@@ -96,6 +96,51 @@ bool Calibration::HasData() const
     return v;
 }
 
+float Calibration::Confidence(int latency, int space) const
+{
+    if (latency < 0 || latency >= kLatencies || space < 0 || space >= kSpaces)
+        return 0.0f;
+    AcquireSRWLockShared(&m_lock);
+    float v = m_samples[latency][space] > 0 ? m_score[latency][space] : 0.0f;
+    ReleaseSRWLockShared(&m_lock);
+    return v;
+}
+
+bool Calibration::HasData(int latency, int space) const
+{
+    if (latency < 0 || latency >= kLatencies || space < 0 || space >= kSpaces)
+        return false;
+    AcquireSRWLockShared(&m_lock);
+    bool v = m_samples[latency][space] >= 5;
+    ReleaseSRWLockShared(&m_lock);
+    return v;
+}
+
+int Calibration::BestSpaceFor(int latency) const
+{
+    if (latency < 0 || latency >= kLatencies)
+        return TlasSpace();
+    AcquireSRWLockShared(&m_lock);
+    int v = m_score[latency][1] > m_score[latency][0] ? 1 : 0;
+    ReleaseSRWLockShared(&m_lock);
+    return v;
+}
+
+int Calibration::BestLatencyFor(int space) const
+{
+    if (space < 0 || space >= kSpaces)
+        return Latency();
+    AcquireSRWLockShared(&m_lock);
+    int v = 0;
+    for (int l = 1; l < kLatencies; ++l)
+    {
+        if (m_score[l][space] > m_score[v][space])
+            v = l;
+    }
+    ReleaseSRWLockShared(&m_lock);
+    return v;
+}
+
 std::string Calibration::Describe() const
 {
     AcquireSRWLockShared(&m_lock);

@@ -148,9 +148,34 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     tlasProduced = TlasInfo{};
     tlasConsumedValid = false;
     tlasConsumed = TlasInfo{};
+    stateUnknown = false;
     injectedPrepare = false;
     injectedComposite = false;
+    preparedSerial = 0;
+    compositeConsumedSerial = 0;
     attachments.clear();
+}
+
+namespace {
+SRWLOCK g_sigLock = SRWLOCK_INIT;
+std::unordered_map<ID3D12CommandSignature*, bool>* g_signatures = new std::unordered_map<ID3D12CommandSignature*, bool>();
+} // namespace
+
+void NoteCommandSignature(ID3D12CommandSignature* signature, bool draws)
+{
+    // Keyed by pointer: a released signature's address can be reused, and the new one overwrites it.
+    AcquireSRWLockExclusive(&g_sigLock);
+    (*g_signatures)[signature] = draws;
+    ReleaseSRWLockExclusive(&g_sigLock);
+}
+
+bool CommandSignatureDraws(ID3D12CommandSignature* signature)
+{
+    AcquireSRWLockShared(&g_sigLock);
+    auto it = g_signatures->find(signature);
+    const bool draws = it == g_signatures->end() || it->second;
+    ReleaseSRWLockShared(&g_sigLock);
+    return draws;
 }
 
 ListState* FindListState(ID3D12CommandList* list)
@@ -269,6 +294,8 @@ const BindingRecord* CloseBinding(ListState& s)
 
     BindingRecord& r = s.current;
     r.listSeq = s.bindingSeq++;
+    r.mrtBefore = s.mrtCount;
+    r.hdrBefore = s.hdrCount;
     if (IsMrtCandidate(r))
         r.mrtOrdinal = static_cast<int32_t>(s.mrtCount++);
     if (IsHdrCandidate(r))
