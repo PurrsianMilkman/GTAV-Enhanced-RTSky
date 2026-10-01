@@ -1,0 +1,64 @@
+name: In-game test report
+description: You ran RTSky in GTA V Enhanced. Tell us what happened, whether it worked or not.
+title: "[Test] <GPU> - <what you saw>"
+labels: ["test report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Story mode only, never GTA Online.
+        Please attach **RTSky.log** and **RTSky_frame.log** (press Ctrl+F11 once during gameplay); both are next to the game executable.
+  - type: input
+    id: version
+    attributes:
+      label: RTSky version
+      description: Release tag or commit (the first lines of RTSky.log)
+      placeholder: v0.1.0-alpha
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: RTX 4070, driver 581.xx
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game version and settings
+      description: Game build, resolution, upscaler (DLSS/FSR/XeSS), frame generation, and which ray-tracing options are on
+      placeholder: 1.0.1013.x, 2560x1440, DLSS Quality, RTGI High, RT reflections on
+    validations:
+      required: true
+  - type: input
+    id: loader
+    attributes:
+      label: ScriptHookV / ASI loader and other mods or overlays
+      placeholder: ScriptHookV 3xxx, xinput1_4.dll loader, RTSS overlay
+  - type: dropdown
+    id: result
+    attributes:
+      label: What happened?
+      options:
+        - It worked (sky shadows visible)
+        - Nothing changed in the image
+        - The image looked wrong (wrong pass darkened, artifacts, flicker)
+        - Crash or device removed / TDR
+        - Game failed to start or froze
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What you saw, where (location, time of day, weather), and the last status line from RTSky.log. Screenshots with RTSky on and off (F10) help a lot.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Drag RTSky.log and RTSky_frame.log here (or paste them)
+    validations:
+      required: true

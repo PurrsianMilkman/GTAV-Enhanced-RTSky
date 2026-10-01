@@ -133,7 +133,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         rtsky::ReloadConfig();
         ApplyConfig();
 
-        LOG_INFO("RTSky - ray-traced sky lighting for GTA V Enhanced");
+        LOG_INFO("RTSky %s - ray-traced sky lighting for GTA V Enhanced", RTSKY_VERSION);
         LOG_INFO("At load: d3d12.dll %s, dxgi.dll %s, sl.interposer.dll %s",
                  GetModuleHandleW(L"d3d12.dll") ? "loaded" : "not loaded", GetModuleHandleW(L"dxgi.dll") ? "loaded" : "not loaded",
                  GetModuleHandleW(L"sl.interposer.dll") ? "loaded" : "not loaded");

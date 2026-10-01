@@ -1,5 +1,10 @@
 # RTSky: ray-traced sky lighting for GTA V Enhanced
 
+> **Status: alpha, not yet tested in game.** The mod builds, and its math and frame-detection
+> logic are covered by tests, but it was written without access to the game. The first in-game runs
+> will need tuning. **Testers are very welcome:** see [Testing](#testing-and-reporting) and
+> [Contributing](CONTRIBUTING.md).
+
 GTA V Enhanced (the 2025 DirectX 12 PC edition) ray traces shadows, reflections, AO and global
 illumination, but its **sky light is still faked**. The ambient term is a hemispherical colour
 gradient from the timecycle multiplied by baked AO, so the sky never really casts shadows. RTSky
@@ -52,10 +57,16 @@ RTSky is a **native mod**, not a ReShade/post-process shader:
   (`xinput1_4.dll`). Ultimate ASI Loader also works. RTSky reads the camera, clock and weather
   through game natives.
 
+## Download
+
+Pre-built releases are on the [Releases page](https://github.com/PurrsianMilkman/GTAV-Enhanced-RTSky/releases):
+`RTSky-<version>.zip` contains `RTSky.asi`, `RTSky.ini`, this README and the docs. Every push also
+builds a zip as a CI artifact (Actions tab, needs a GitHub login).
+
 ## Install
 
 1. Install ScriptHookV for Enhanced (`ScriptHookV.dll` and the ASI loader) into the game folder.
-2. Copy `RTSky.asi` and `RTSky.ini` into the same folder.
+2. Copy `RTSky.asi` and `RTSky.ini` from the release zip into the same folder.
 3. Start the game, load story mode, and look at `RTSky.log` next to the game executable.
 
 On the first frames RTSky analyses the frame, finds the G-buffer and lighting passes, captures the
@@ -115,6 +126,20 @@ See [docs/CALIBRATION.md](docs/CALIBRATION.md). In short:
 * Without a game to test against while writing it, the frame-structure detection is heuristic and
   self-checking. The frame dump exists to tune it on any game version.
 
+## Testing and reporting
+
+The most useful contribution right now is a test run:
+
+1. Install as above, start story mode with ray tracing enabled, and play for a minute. Drive under a
+   bridge, stand under trees, and turn the camera around.
+2. Press **Ctrl+F11** once during gameplay to write `RTSky_frame.log`.
+3. Open an issue with the **In-game test report** template, attach `RTSky.log` and
+   `RTSky_frame.log` (next to the game executable), and add screenshots with RTSky on and off (F10)
+   if you can.
+
+The log's status line (written every 10 s) shows what RTSky found: the device, the G-buffer and
+lighting passes, the TLAS, calibration, and why it skipped injection if it did.
+
 ## Building
 
 Requirements: CMake 3.21+, a C++20 compiler (MSVC 2022 or MinGW-w64), and DXC (Windows SDK 10.0.22621+
@@ -142,6 +167,16 @@ tracker and analyzer sources against simulated frames.
 cmake -S tests -B build-tests -DRTSKY_DIRECTX_HEADERS_DIR=/path/to/DirectX-Headers
 cmake --build build-tests && ctest --test-dir build-tests --output-on-failure
 ```
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains the code layout, how to build
+and test, and what needs work. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the design.
+
+## License
+
+RTSky is licensed under the [GNU General Public License v3.0](LICENSE). The vendored MinHook is
+BSD-2-Clause (`third_party/minhook/LICENSE.txt`).
 
 ## Credits
 
