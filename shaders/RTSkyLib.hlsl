@@ -64,6 +64,6 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 void AnyHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attribs)
 {
     // Only invoked for non-opaque (alpha-tested) geometry in stochastic foliage mode.
-    if (!FoliageAccept(InstanceIndex(), PrimitiveIndex(), attribs.barycentrics))
+    if (!FoliageAccept(InstanceID(), PrimitiveIndex(), attribs.barycentrics))
         IgnoreHit();
 }

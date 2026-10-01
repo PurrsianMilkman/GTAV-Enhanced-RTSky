@@ -119,14 +119,16 @@ float InterleavedGradientNoise(float2 pixel, uint frame)
     return frac(52.9829189f * frac(0.06711056f * pixel.x + 0.00583715f * pixel.y));
 }
 
-// 2D sample i of a per-pixel Cranley-Patterson rotated R2 sequence
+// 2D sample i of a per-pixel Cranley-Patterson rotated R2 sequence. The sequence step n * alpha is
+// done in 0.32 fixed point (exact modulo 1 for any n): in float32, alpha * n loses every fractional
+// bit once the frame counter is large, and all rays would collapse onto a few directions.
 float2 SampleR2(uint2 pixel, uint frame, uint i)
 {
-    const float2 alpha = float2(0.7548776662466927f, 0.5698402909980532f);
+    const uint2 alpha = uint2(3242174889u, 2447445414u); // (0.7548776662, 0.5698402910) * 2^32
     float2 rotation = float2(InterleavedGradientNoise(float2(pixel), frame),
                              UintToUnitFloat(PcgHash(pixel.x * 1973u + pixel.y * 9277u + frame * 26699u)));
-    float n = float(frame * 16u + i);
-    return frac(rotation + alpha * n);
+    uint2 q = (frame * 16u + i) * alpha;
+    return frac(rotation + float2(UintToUnitFloat(q.x), UintToUnitFloat(q.y)));
 }
 
 void BuildBasis(float3 n, out float3 t, out float3 b)

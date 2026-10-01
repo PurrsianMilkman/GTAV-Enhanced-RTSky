@@ -52,11 +52,14 @@ uint InstanceMask()
 // alpha textures are not reachable from RTSky's shaders, so each triangle is split into a grid of
 // cells in barycentric space and each cell is opaque with probability FoliageOpacity. This gives
 // leaf-like partial occlusion under tree canopies instead of solid cards or no shadow at all.
-bool FoliageAccept(uint instanceIndex, uint primitiveIndex, float2 barycentrics)
+// The key uses the game's InstanceID (a value it assigns) and never InstanceIndex: the position of
+// an instance in a TLAS that is rebuilt every frame shifts whenever an earlier instance is culled,
+// which would reshuffle the whole canopy pattern.
+bool FoliageAccept(uint instanceId, uint primitiveIndex, float2 barycentrics)
 {
     float cells = max(g_Frame.foliageParams.y, 1.0f);
     uint2 cell = uint2(saturate(barycentrics) * cells);
-    uint h = PcgHash(instanceIndex * 0x9E3779B1u ^ PcgHash(primitiveIndex ^ PcgHash(cell.x + cell.y * 131u)));
+    uint h = PcgHash(instanceId * 0x9E3779B1u ^ PcgHash(primitiveIndex ^ PcgHash(cell.x + cell.y * 131u)));
     return UintToUnitFloat(h) < g_Frame.foliageParams.x;
 }
 

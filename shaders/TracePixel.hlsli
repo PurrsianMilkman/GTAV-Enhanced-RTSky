@@ -46,6 +46,7 @@ void TracePixel(uint2 pixel)
     float tMin = g_Frame.traceParams.w;
     float tMax = g_Frame.traceParams.x;
     float4 overcast = g_SkyData[0].overcast;
+    float radianceScale = TraceRadianceScale();
 
     uint rays = clamp(g_Frame.traceFlags.x, 1u, 16u);
     uint frame = g_Frame.traceFlags.z;
@@ -63,7 +64,7 @@ void TracePixel(uint2 pixel)
     {
         float2 u = SampleR2(pixel, frame, i);
         float3 dir = CosineSampleHemisphere(N, u);
-        float3 L = SkyRadiance(g_SkyViewLut, dir, overcast);
+        float3 L = SkyRadiance(g_SkyViewLut, dir, overcast) * radianceScale;
         if (dir.z > 0.0f)
         {
             float vNear = 1.0f;

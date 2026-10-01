@@ -62,7 +62,8 @@ void CompositeCS(uint3 id : SV_DispatchThreadID)
 
     SkyData sky = g_SkyData[0];
     float3 eSky = EvaluateSkyIrradianceSH(g_SkyData, N);
-    bool lightIsSun = g_Frame.compositeParams4.z > 0.5f;
+    // Same selector as the trace's shadow ray (sun until it is ~10 degrees below the horizon).
+    bool lightIsSun = g_Frame.lightSelect.x > 0.5f;
     float3 lightDir = lightIsSun ? g_Frame.sunDir.xyz : g_Frame.moonDir.xyz;
     float3 eLight = lightIsSun ? sky.sunIrradiance.rgb : sky.moonIrradiance.rgb;
     float3 eDir = eLight * saturate(dot(N, lightDir)) * sunVisibility * g_Frame.compositeParams2.x;
@@ -103,7 +104,7 @@ void CompositeCS(uint3 id : SV_DispatchThreadID)
         result = EncodeForTarget(frac(log2(max(z, 1e-3f))).xxx);
         break;
     case RTSKY_VIEW_SKY_S:
-        result = EncodeForTarget(s.rgb / max(Luminance(eSky) * INV_PI, 1e-8f));
+        result = EncodeForTarget(s.rgb / max(Luminance(eSky) * INV_PI * TraceRadianceScale(), 1e-8f));
         break;
     case RTSKY_VIEW_TLAS:
         result = EncodeForTarget(g_TraceS.Load(int3(tp, 0)).rgb);

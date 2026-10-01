@@ -15,6 +15,14 @@ float3 SkyLightIlluminance()
     return g_Frame.lightSelect.x > 0.5f ? g_Frame.solarIlluminance.rgb : g_Frame.moonIlluminance.rgb;
 }
 
+// The trace stores S and U relative to the luminance of the light that illuminates the sky, so they
+// stay well inside the half-float range by day and by night (moonlit sky radiance is ~1e-8 in
+// absolute units, below the smallest fp16 subnormal). R = S / U is unaffected by the scale.
+float TraceRadianceScale()
+{
+    return 1.0f / max(Luminance(SkyLightIlluminance()), 1e-12f);
+}
+
 // Clear-sky luminance for unit light illuminance, looked up in the sky-view LUT.
 // dir: unit world direction (Z up).
 float3 SkyViewLuminance(Texture2D<float4> skyViewLut, float3 dir)
