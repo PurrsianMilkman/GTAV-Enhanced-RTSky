@@ -15,6 +15,7 @@ extern const unsigned RTSKY_IDX_Device_CreateCommandList1;
 extern const unsigned RTSKY_IDX_Device_CopyDescriptors;
 extern const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple;
 extern const unsigned RTSKY_IDX_Device_CreateCommandSignature;
+extern const unsigned RTSKY_IDX_Device_CreateCommandQueue;
 
 // ID3D12GraphicsCommandList7
 extern const unsigned RTSKY_IDX_CL_Close;

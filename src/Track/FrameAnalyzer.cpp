@@ -4,6 +4,7 @@
 #include "../Common/Log.h"
 
 #include <cstdio>
+#include <string>
 #include <map>
 
 namespace rtsky::track {
@@ -272,9 +273,11 @@ void FrameAnalyzer::Analyze(bool forceDump)
     }
 
     // 2. G-buffer phases: maximal runs of bindings with the G-buffer signature that are not separated
-    //    by an HDR-candidate binding of G-buffer size. A G-buffer that is re-bound several times
+    //    by a lighting-like binding (float first target of G-buffer size that is not itself an MRT
+    //    pass, e.g. a decal pass on a float G-buffer). A G-buffer that is re-bound several times
     //    (opaque, decals, foliage), split across command lists or across suspended render passes
     //    forms ONE phase, and a frame is one phase plus everything up to the next phase.
+    //    With GBufferOrdinal pinned, every occurrence of that binding starts a frame instead.
     const UINT64 gW = best->sig.width;
     const UINT gH = best->sig.height;
     auto isGbuffer = [&](const BindingRecord& r) { return r.mrtOrdinal >= 0 && best->sig.Matches(r); };
@@ -286,22 +289,42 @@ void FrameAnalyzer::Analyze(bool forceDump)
         uint32_t bindings = 0;
     };
     std::vector<Phase> phases;
-    bool hdrSincePhase = true;
-    for (size_t i = 0; i < m_window.size(); ++i)
+    if (m_gbufferOrdinalOverride >= 0)
     {
-        const BindingRecord& r = m_window[i];
-        if (isGbuffer(r))
+        for (size_t i = 0; i < m_window.size(); ++i)
         {
-            if (hdrSincePhase)
-                phases.push_back(Phase{ i, i, 0 });
-            phases.back().last = i;
-            ++phases.back().bindings;
-            hdrSincePhase = false;
+            const BindingRecord& r = m_window[i];
+            if (isGbuffer(r) && r.mrtOrdinal == m_gbufferOrdinalOverride)
+                phases.push_back(Phase{ i, i, 1 });
         }
-        else if (isHdr(r))
+    }
+    else
+    {
+        bool litSincePhase = true;
+        for (size_t i = 0; i < m_window.size(); ++i)
         {
-            hdrSincePhase = true;
+            const BindingRecord& r = m_window[i];
+            if (isGbuffer(r))
+            {
+                if (litSincePhase)
+                    phases.push_back(Phase{ i, i, 0 });
+                phases.back().last = i;
+                ++phases.back().bindings;
+                litSincePhase = false;
+            }
+            else if (isHdr(r) && r.mrtOrdinal < 0)
+            {
+                litSincePhase = true;
+            }
         }
+    }
+    if (phases.empty())
+    {
+        m_status = "G-buffer " + best->sig.ToString() + " found, but no binding with GBufferOrdinal=" +
+                   std::to_string(m_gbufferOrdinalOverride);
+        if (m_dumpRequested || forceDump)
+            WriteDump(0, m_window.size(), m_rules);
+        return;
     }
     // Without HDR passes, consecutive frames merge into one phase (menus and loading screens that
     // still render a G-buffer but light nothing). A phase that keeps growing means exactly that.
@@ -316,6 +339,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
         }
         m_stableCount = 0;
         m_status = "G-buffer " + best->sig.ToString() + " without an HDR pass (menu / loading?)";
+        if (m_dumpRequested || forceDump)
+            WriteDump(0, m_window.size(), m_rules);
         const size_t keepFrom = phases.back().last;
         m_window.erase(m_window.begin(), m_window.begin() + static_cast<std::ptrdiff_t>(keepFrom));
         m_markers.clear();
@@ -324,6 +349,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
     if (phases.size() < 2)
     {
         m_status = "G-buffer " + best->sig.ToString() + " found, waiting for a complete frame";
+        if (m_dumpRequested || forceDump)
+            WriteDump(0, m_window.size(), m_rules);
         return;
     }
 
@@ -338,13 +365,15 @@ void FrameAnalyzer::Analyze(bool forceDump)
         const size_t frameBegin = phases[k].first;
         const size_t frameEnd = phases[k + 1].first;
 
-        // Prepare: the LAST binding of the phase (the depth is complete only there), or the last one
-        // with the configured ordinal.
+        // Prepare: the LAST binding of the phase that writes depth (the depth is complete only
+        // there; read-only-depth re-binds such as decals do not change it), or the pinned binding.
         const BindingRecord* g = nullptr;
         for (size_t i = phases[k].first; i <= phases[k].last; ++i)
         {
             const BindingRecord& r = m_window[i];
-            if (isGbuffer(r) && (m_gbufferOrdinalOverride < 0 || r.mrtOrdinal == m_gbufferOrdinalOverride))
+            if (!isGbuffer(r))
+                continue;
+            if (m_gbufferOrdinalOverride >= 0 ? r.mrtOrdinal == m_gbufferOrdinalOverride : !r.dsvReadOnlyDepth)
                 g = &r;
         }
 
@@ -474,7 +503,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
                        "(press the frame-dump key and see docs/CALIBRATION.md)";
         else
             m_status = "G-buffer " + best->sig.ToString() + ", HDR pass " +
-                       (m_stableCount > 0 ? "found, stabilising" : "not found (check CompositeCandidate)");
+                       (m_stableCount > 0 ? "found, stabilising (if this persists, pin GBufferOrdinal from the frame dump)"
+                                          : "not found (check CompositeCandidate)");
     }
 
     if (m_dumpRequested || forceDump)

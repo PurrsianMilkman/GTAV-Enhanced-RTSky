@@ -7,6 +7,22 @@
 
 namespace rtsky::render {
 
+void Calibration::SetPinned(int latency, int space)
+{
+    AcquireSRWLockExclusive(&m_lock);
+    if (latency != m_pinnedLatency || space != m_pinnedSpace)
+    {
+        m_pinnedLatency = latency;
+        m_pinnedSpace = space;
+        if (latency >= 0)
+            m_latency = latency;
+        if (space >= 0)
+            m_space = space;
+        m_switchVotes = 0;
+    }
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
 void Calibration::Submit(const uint32_t* results, bool informative)
 {
     AcquireSRWLockExclusive(&m_lock);
@@ -22,6 +38,9 @@ void Calibration::Submit(const uint32_t* results, bool informative)
                 continue;
             // The TLAS space is observable even with a static camera; latency is not.
             if (!informative && l != m_latency)
+                continue;
+            // A pinned value is not a hypothesis: only its row / column is scored.
+            if ((m_pinnedLatency >= 0 && l != m_pinnedLatency) || (m_pinnedSpace >= 0 && s != m_pinnedSpace))
                 continue;
             const float score = static_cast<float>(matches) / static_cast<float>(valid);
             const float alpha = m_samples[l][s] < 10 ? 0.3f : 0.05f;
@@ -112,31 +131,6 @@ bool Calibration::HasData(int latency, int space) const
         return false;
     AcquireSRWLockShared(&m_lock);
     bool v = m_samples[latency][space] >= 5;
-    ReleaseSRWLockShared(&m_lock);
-    return v;
-}
-
-int Calibration::BestSpaceFor(int latency) const
-{
-    if (latency < 0 || latency >= kLatencies)
-        return TlasSpace();
-    AcquireSRWLockShared(&m_lock);
-    int v = m_score[latency][1] > m_score[latency][0] ? 1 : 0;
-    ReleaseSRWLockShared(&m_lock);
-    return v;
-}
-
-int Calibration::BestLatencyFor(int space) const
-{
-    if (space < 0 || space >= kSpaces)
-        return Latency();
-    AcquireSRWLockShared(&m_lock);
-    int v = 0;
-    for (int l = 1; l < kLatencies; ++l)
-    {
-        if (m_score[l][space] > m_score[v][space])
-            v = l;
-    }
     ReleaseSRWLockShared(&m_lock);
     return v;
 }

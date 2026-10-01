@@ -18,6 +18,7 @@ const unsigned RTSKY_IDX_Device_CreateCommandList1 = RTSKY_SLOT(ID3D12Device5, C
 const unsigned RTSKY_IDX_Device_CopyDescriptors = RTSKY_SLOT(ID3D12Device5, CopyDescriptors);
 const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple = RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple);
 const unsigned RTSKY_IDX_Device_CreateCommandSignature = RTSKY_SLOT(ID3D12Device5, CreateCommandSignature);
+const unsigned RTSKY_IDX_Device_CreateCommandQueue = RTSKY_SLOT(ID3D12Device5, CreateCommandQueue);
 
 const unsigned RTSKY_IDX_CL_Close = RTSKY_SLOT(ID3D12GraphicsCommandList7, Close);
 const unsigned RTSKY_IDX_CL_Reset = RTSKY_SLOT(ID3D12GraphicsCommandList7, Reset);
@@ -65,3 +66,4 @@ _Static_assert(RTSKY_SLOT(ID3D12CommandQueue, ExecuteCommandLists) == 10, "unexp
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateRenderTargetView) == 20, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple) == 24, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommandSignature) == 41, "unexpected vtable layout");
+_Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommandQueue) == 8, "unexpected vtable layout");

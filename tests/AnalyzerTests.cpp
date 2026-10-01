@@ -94,15 +94,24 @@ BoundTarget Target(ID3D12Resource* r, DXGI_FORMAT f)
     return t;
 }
 
-void Bind(ListState& s, bool mrt, uint32_t draws)
+// Pass kinds: 'G' G-buffer (4 x RGBA8 + depth), 'g' the same with read-only depth (decals),
+// 'F' a float MRT pass (3 x RGBA16F + depth), 'H' a float HDR pass (1 x RGBA16F + depth).
+void Bind(ListState& s, char kind, uint32_t draws)
 {
     s.current = BindingRecord{};
     BindingRecord& r = s.current;
-    if (mrt)
+    if (kind == 'G' || kind == 'g')
     {
         r.rtvCount = 4;
         for (int i = 0; i < 4; ++i)
             r.rtv[i] = Target(kGbufferRt, DXGI_FORMAT_R8G8B8A8_UNORM);
+        r.dsvReadOnlyDepth = kind == 'g';
+    }
+    else if (kind == 'F')
+    {
+        r.rtvCount = 3;
+        for (int i = 0; i < 3; ++i)
+            r.rtv[i] = Target(kHdrRt, DXGI_FORMAT_R16G16B16A16_FLOAT);
     }
     else
     {
@@ -116,7 +125,12 @@ void Bind(ListState& s, bool mrt, uint32_t draws)
     CloseBinding(s);
 }
 
-// A frame: a sequence of lists, each a string of 'G' (G-buffer binding) / 'H' (HDR binding).
+void Bind(ListState& s, bool mrt, uint32_t draws)
+{
+    Bind(s, mrt ? 'G' : 'H', draws);
+}
+
+// A frame: a sequence of lists, each a string of pass kinds (see Bind).
 void RunFrame(const std::vector<std::pair<ID3D12GraphicsCommandList*, const char*>>& lists)
 {
     std::vector<ID3D12CommandList*> submit;
@@ -125,7 +139,7 @@ void RunFrame(const std::vector<std::pair<ID3D12GraphicsCommandList*, const char
         ListState& s = *GetListState(list);
         OnReset(s, nullptr);
         for (const char* p = passes; *p != 0; ++p)
-            Bind(s, *p == 'G', *p == 'G' ? 500 : 20);
+            Bind(s, *p, *p == 'G' ? 500 : 20);
         submit.push_back(list);
     }
     g_testTick += 16;
@@ -176,6 +190,31 @@ int main()
         Check(r.armed, "armed");
         Check(r.gbufferOrdinal == 2, "Prepare at mrt#2");
         Check(r.hdrOrdinal == 0, "Composite at hdr#0");
+    }
+    {
+        Scenario("decals re-bind the G-buffer with read-only depth: Prepare stays on the depth-writing binding");
+        ID3D12GraphicsCommandList* a = NewList();
+        Frames(60, { { a, "GgH" } });
+        const InjectionRules r = Analyzer().Rules();
+        Check(r.armed && r.gbufferOrdinal == 0, "Prepare at mrt#0 (not the read-only mrt#1)");
+    }
+    {
+        Scenario("a float MRT pass inside the G-buffer phase does not split the frame");
+        ID3D12GraphicsCommandList* a = NewList();
+        Frames(60, { { a, "GFGH" } });
+        const InjectionRules r = Analyzer().Rules();
+        Check(r.armed, "armed");
+        Check(r.gbufferOrdinal == 2, "Prepare at mrt#2 (after the float MRT pass)");
+        Check(r.hdrOrdinal == 1, "Composite at hdr#1 (the float MRT pass is hdr#0)");
+    }
+    {
+        Scenario("a lighting-like pass between two G-buffer binds: pinning GBufferOrdinal delimits frames");
+        Analyzer().Configure(0, 1, -1, 3);
+        ID3D12GraphicsCommandList* a = NewList();
+        Frames(60, { { a, "GHGHH" } });
+        const InjectionRules r = Analyzer().Rules();
+        Check(r.armed && r.gbufferOrdinal == 1 && r.hdrOrdinal == 1, "Prepare at mrt#1, Composite at hdr#1");
+        Analyzer().Configure(0, -1, -1, 3);
     }
     {
         Scenario("CompositeCandidate=1 picks the second HDR pass");

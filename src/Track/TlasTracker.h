@@ -30,6 +30,8 @@ struct TlasInfo
     uint64_t buildSerial = 0;                // increases with every recorded scene TLAS build
     // Keeps the clone buffer alive and marks its ring slot busy while any copy of this exists.
     std::shared_ptr<void> cloneHolder;
+    int cloneSlot = -1;     // ring slot of the clone (-1: no clone)
+    uint64_t cloneGen = 0;  // the slot's generation when the clone was written
     // Submission of the producing list (set by Publish; null queue = not submitted yet).
     ID3D12CommandQueue* producerQueue = nullptr; // not AddRef'd, compared only
     Microsoft::WRL::ComPtr<ID3D12Fence> producerFence;
@@ -50,7 +52,9 @@ public:
 
     // Newest SUBMITTED scene TLAS that a consumer may read without a cross-queue wait: one whose
     // producing submission has completed, or one produced on the queue that runs RTSky's composite
-    // (NoteConsumerQueue). Fails if there is none yet.
+    // (NoteConsumerQueue). The last few published clones are kept, so a producer on another queue
+    // that is always a frame or two ahead still yields a fresh, completed clone each frame. Fails if
+    // there is none.
     bool GetSceneTlas(TlasInfo* out);
 
     // The queue on which lists carrying RTSky's composite were last submitted.
@@ -80,11 +84,15 @@ private:
     mutable SRWLOCK m_lock = SRWLOCK_INIT;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_clones[kCloneRing];
     std::shared_ptr<void> m_cloneHolders[kCloneRing]; // use_count() == 1: only the ring holds it
+    uint64_t m_slotGen[kCloneRing] = {};              // bumped whenever a slot is (re)written
     UINT64 m_cloneSizes[kCloneRing] = {};
     uint32_t m_nextClone = 0;
 
-    TlasInfo m_latest;     // newest published clone
-    TlasInfo m_completed;  // newest published clone whose producer has completed
+    // Published clones, newest first. They do not hold the busy token (that would pin ring slots);
+    // a slot that was rewritten since is detected through its generation.
+    static constexpr uint32_t kHistory = 4;
+    TlasInfo m_history[kHistory];
+    uint32_t m_historyCount = 0;
     ID3D12CommandQueue* m_consumerQueue = nullptr; // not AddRef'd, compared only
     ID3D12Device* m_device = nullptr;              // device of the clone ring (not AddRef'd)
     uint64_t m_allocRetryAt = 0;                   // scene-build count before which allocation is not retried

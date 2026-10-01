@@ -29,9 +29,9 @@ public:
     // The same for a given hypothesis (the one actually rendered with when a value is pinned).
     float Confidence(int latency, int space) const;
     bool HasData(int latency, int space) const;
-    // Best value of one dimension when the other one is pinned in the INI.
-    int BestSpaceFor(int latency) const;
-    int BestLatencyFor(int space) const;
+    // Values pinned in the INI (-1 = automatic). The search, its hysteresis and the minimum sample
+    // count then work within the pinned row / column, and Latency() / TlasSpace() return the pin.
+    void SetPinned(int latency, int space);
     std::string Describe() const;
 
 private:
@@ -41,6 +41,8 @@ private:
     int m_latency = 1;
     int m_space = 0;
     int m_switchVotes = 0;
+    int m_pinnedLatency = -1;
+    int m_pinnedSpace = -1;
     uint64_t m_submissions = 0;
 };
 

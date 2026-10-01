@@ -81,9 +81,8 @@ void RejectVtable(void** vtable, D3D12_COMMAND_LIST_TYPE type)
     if (g_rejectedCount < 32)
         g_rejected[g_rejectedCount++] = vtable;
     ReleaseSRWLockExclusive(&g_rejectLock);
-    if (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE)
-        LOG_WARN("Command list vtable %p (type %d) does not expose ID3D12GraphicsCommandList7; not tracked",
-                 static_cast<void*>(vtable), static_cast<int>(type));
+    LOG_WARN("Command list vtable %p (type %d) does not expose ID3D12GraphicsCommandList7; not tracked",
+             static_cast<void*>(vtable), static_cast<int>(type));
 }
 
 // Returns true if the list is (now) patched.
@@ -96,15 +95,13 @@ bool PatchList(ID3D12CommandList* list)
     void** vtable = *reinterpret_cast<void***>(list);
     if (IsRejectedVtable(vtable))
         return false;
+    // Copy / bundle / video lists are skipped per call, never cached: a vtable shared by all list
+    // types must still be patched when a DIRECT or COMPUTE list with it shows up.
     const D3D12_COMMAND_LIST_TYPE type = list->GetType();
-    bool ok = type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    if (ok)
-    {
-        ComPtr<ID3D12GraphicsCommandList7> list7;
-        ok = SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list7))) &&
-             static_cast<void*>(list7.Get()) == static_cast<void*>(list);
-    }
-    if (!ok)
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT && type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        return false;
+    ComPtr<ID3D12GraphicsCommandList7> list7;
+    if (FAILED(list->QueryInterface(IID_PPV_ARGS(&list7))) || static_cast<void*>(list7.Get()) != static_cast<void*>(list))
     {
         RejectVtable(vtable, type);
         return false;
@@ -175,6 +172,21 @@ void STDMETHODCALLTYPE Device_CreateDepthStencilView(ID3D12Device* self, ID3D12R
         track::Descriptors().OnCreateDSV(resource, desc, handle);
     using Fn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
     Orig<Fn>(g_device, RTSKY_IDX_Device_CreateDepthStencilView, self, resource, desc, handle);
+}
+
+// Queues of every class must be hooked: TLAS clones are published and GPU lifetimes tracked from
+// ExecuteCommandLists, whichever queue (direct, async compute) the game submits on.
+HRESULT STDMETHODCALLTYPE Device_CreateCommandQueue(ID3D12Device* self, const D3D12_COMMAND_QUEUE_DESC* desc, REFIID riid, void** queue)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_COMMAND_QUEUE_DESC*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateCommandQueue, self, desc, riid, queue);
+    if (SUCCEEDED(hr) && queue != nullptr && *queue != nullptr && !HookBypass::Active() && g_installed.load())
+    {
+        ComPtr<ID3D12CommandQueue> q;
+        if (SUCCEEDED(static_cast<IUnknown*>(*queue)->QueryInterface(IID_PPV_ARGS(&q))) && !g_queue.IsKnownFast(q.Get()))
+            g_queue.Patch(q.Get());
+    }
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE Device_CreateCommandSignature(ID3D12Device* self, const D3D12_COMMAND_SIGNATURE_DESC* desc,
@@ -624,6 +636,7 @@ void RegisterHooks()
     g_device.AddHook(RTSKY_IDX_Device_CopyDescriptors, reinterpret_cast<void*>(&Device_CopyDescriptors));
     g_device.AddHook(RTSKY_IDX_Device_CopyDescriptorsSimple, reinterpret_cast<void*>(&Device_CopyDescriptorsSimple));
     g_device.AddHook(RTSKY_IDX_Device_CreateCommandSignature, reinterpret_cast<void*>(&Device_CreateCommandSignature));
+    g_device.AddHook(RTSKY_IDX_Device_CreateCommandQueue, reinterpret_cast<void*>(&Device_CreateCommandQueue));
 
 #define RTSKY_HOOK(Name) g_list.AddHook(RTSKY_IDX_CL_##Name, reinterpret_cast<void*>(&CL_##Name))
     RTSKY_HOOK(Close);
@@ -691,14 +704,22 @@ bool PatchFromDevice(ID3D12Device* device)
     g_rtvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     g_dsvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
+    // A permanent failure (old runtime, unwritable vtable) disables RTSky for the session; anything
+    // else (a device on another adapter that cannot create queues, out of memory) is retried with
+    // the next device - the device hooks stay installed and are inert until then.
+    bool permanent = false;
     bool ok = g_device.Patch(device);
+    permanent = !ok;
 
     D3D12_COMMAND_QUEUE_DESC qd = {};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    ComPtr<ID3D12CommandQueue> queue;
+    D3D12_COMMAND_QUEUE_DESC cqd = {};
+    cqd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    ComPtr<ID3D12CommandQueue> queue, computeQueue;
     ComPtr<ID3D12CommandAllocator> directAlloc, computeAlloc;
     ComPtr<ID3D12GraphicsCommandList> directList, computeList;
     ok &= SUCCEEDED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)));
+    ok &= SUCCEEDED(device->CreateCommandQueue(&cqd, IID_PPV_ARGS(&computeQueue)));
     ok &= SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&directAlloc)));
     ok &= SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&computeAlloc)));
     if (ok)
@@ -714,13 +735,21 @@ bool PatchFromDevice(ID3D12Device* device)
         {
             LOG_ERROR("ID3D12GraphicsCommandList7 is not available (outdated D3D12 runtime) - RTSky disabled");
             ok = false;
+            permanent = true;
         }
     }
     if (ok)
     {
-        ok &= g_queue.Patch(queue.Get());
-        ok &= g_list.Patch(directList.Get());
-        ok &= g_list.Patch(computeList.Get());
+        // Direct and async-compute queues: TLAS clones are published from whichever queue runs them.
+        bool patched = g_queue.Patch(queue.Get());
+        patched &= g_queue.Patch(computeQueue.Get());
+        patched &= g_list.Patch(directList.Get());
+        patched &= g_list.Patch(computeList.Get());
+        if (!patched)
+        {
+            ok = false;
+            permanent = true;
+        }
     }
     if (directList)
         directList->Close();
@@ -731,7 +760,7 @@ bool PatchFromDevice(ID3D12Device* device)
     {
         g_installed.store(true);
     }
-    else
+    else if (permanent)
     {
         // Leave nothing half-installed: hooks without a complete set would track lists partially.
         g_list.Unpatch();
@@ -742,8 +771,10 @@ bool PatchFromDevice(ID3D12Device* device)
     ReleaseSRWLockExclusive(&g_installLock);
     if (ok)
         LOG_INFO("D3D12 hooks installed (device %p)", static_cast<void*>(device));
+    else if (permanent)
+        LOG_ERROR("D3D12 hook installation failed - RTSky disabled for this session");
     else
-        LOG_ERROR("D3D12 hook installation failed");
+        LOG_WARN("D3D12 hook installation failed on device %p - retrying with the next device", static_cast<void*>(device));
     return ok;
 }
 

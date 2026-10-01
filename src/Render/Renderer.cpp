@@ -1040,6 +1040,9 @@ static bool StateFromObserved(const track::ObservedState& o, GameResourceState* 
     out->layout = static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout);
     if (o.enhanced)
     {
+        // NO_ACCESS (with SYNC_NONE) is deliberately not taken over: the restore would have to re-open
+        // a NO_ACCESS / SYNC_NONE scope, and the game's next barrier (SyncBefore NONE) would then not
+        // wait for RTSky's compute work on the resource.
         if (o.accessAfter == D3D12_BARRIER_ACCESS_NO_ACCESS)
             return false;
         out->scopeObserved = true;
@@ -1146,10 +1149,10 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     }
 
     // Camera for this frame + calibration hypotheses
-    // A pinned TLAS space restricts the latency choice to that row of the calibration scores.
-    const int latency = cfg.cameraLatency >= 0                         ? cfg.cameraLatency
-                        : cfg.tlasSpace != TlasSpaceSetting::Auto      ? m_calibration.BestLatencyFor(static_cast<int>(cfg.tlasSpace))
-                                                                       : m_calibration.Latency();
+    // Pinned values restrict the calibration's search to their row / column (with the same
+    // hysteresis as the automatic choice).
+    m_calibration.SetPinned(cfg.cameraLatency, cfg.tlasSpace == TlasSpaceSetting::Auto ? -1 : static_cast<int>(cfg.tlasSpace));
+    const int latency = m_calibration.Latency();
     const float aspect = float(w) / float(h);
     PendingFrame f;
     game::CameraSample sample;
@@ -1302,9 +1305,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
 
     // Calibration gate: a wrong camera / TLAS space would produce garbage occlusion.
     const bool calibrating = cfg.calibrationProbe && (cfg.cameraLatency < 0 || cfg.tlasSpace == TlasSpaceSetting::Auto);
-    int tlasSpace = cfg.tlasSpace != TlasSpaceSetting::Auto ? static_cast<int>(cfg.tlasSpace)
-                    : cfg.cameraLatency >= 0                ? m_calibration.BestSpaceFor(cfg.cameraLatency)
-                                                            : m_calibration.TlasSpace();
+    int tlasSpace = m_calibration.TlasSpace(); // the pinned value when TlasSpace is set in the INI
 
     // Composite target
     const D3D12_RESOURCE_DESC targetDesc = ResourceDesc(target);
