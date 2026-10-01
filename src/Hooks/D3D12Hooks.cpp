@@ -19,6 +19,7 @@
 #include <winternl.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
 
 namespace rtsky::hooks {
