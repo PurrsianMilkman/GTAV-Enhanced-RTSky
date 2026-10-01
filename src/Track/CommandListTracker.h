@@ -12,6 +12,8 @@
 
 #include <d3d12.h>
 
+#include "TlasTracker.h"
+
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -46,6 +48,7 @@ struct BindingRecord
     uint32_t listSeq = 0;      // index of the binding within the list
     uint32_t barrierSeqAtLastDraw = 0;
     bool fromRenderPass = false;
+    bool noInjectAfter = false; // suspending render pass / PRESERVE_LOCAL ending access: nothing may follow
     bool dsvCleared = false;
     float dsvClearDepth = 0.0f;
 };
@@ -55,12 +58,17 @@ bool IsFloatHdrFormat(DXGI_FORMAT f);
 bool IsMrtCandidate(const BindingRecord& r);
 bool IsHdrCandidate(const BindingRecord& r);
 
+// State of subresource 0 (mip 0, slice 0, plane 0) of a resource, as left by the last barrier the
+// game recorded on this list that covered it. That is the only subresource RTSky ever transitions
+// (the depth plane of the G-buffer depth, and single-subresource HDR targets).
 struct ObservedState
 {
     uint32_t stateOrLayout = 0; // D3D12_RESOURCE_STATES (legacy) or D3D12_BARRIER_LAYOUT (enhanced)
     bool enhanced = false;
+    bool splitPending = false;  // a split barrier (BEGIN_ONLY / SyncAfter == SPLIT) has not ended yet
+    D3D12_BARRIER_SYNC syncAfter = D3D12_BARRIER_SYNC_NONE;       // enhanced only
+    D3D12_BARRIER_ACCESS accessAfter = D3D12_BARRIER_ACCESS_COMMON; // enhanced only
     uint32_t seq = 0;           // barrier sequence number within the list
-    uint32_t subresource = 0xFFFFFFFFu; // D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES or a specific one
 };
 
 struct BindPointState
@@ -121,6 +129,14 @@ struct ListState
     std::unordered_map<ID3D12Resource*, ObservedState> observed;
     uint32_t barrierSeq = 0;
 
+    // Scene TLAS clone recorded in this list; published to the tracker when the list is submitted.
+    bool tlasProducedValid = false;
+    TlasInfo tlasProduced;
+    // Published clone that RTSky's trace in this list reads: when it was produced on another queue,
+    // the ExecuteCommandLists hook makes the submitting queue wait for the producer's fence.
+    bool tlasConsumedValid = false;
+    TlasInfo tlasConsumed;
+
     // Statistics for the frame dump
     uint32_t tlasBuilds = 0;
     uint32_t blasBuilds = 0;
@@ -157,8 +173,8 @@ void OnClearDepth(ListState& s, D3D12_CPU_DESCRIPTOR_HANDLE dsv, D3D12_CLEAR_FLA
 void OnResourceBarrier(ListState& s, UINT count, const D3D12_RESOURCE_BARRIER* barriers);
 void OnEnhancedBarrier(ListState& s, UINT count, const D3D12_BARRIER_GROUP* groups);
 
-// Resolves the state of `resource` at the current point of the list: first from barriers recorded
-// after the last draw of the given binding record, otherwise returns false (caller infers).
+// State of subresource 0 of `resource` if a barrier covering it was recorded on this list after
+// barrier sequence `afterSeq` (e.g. after the last draw of a binding); false if none (caller infers).
 bool FindObservedState(const ListState& s, ID3D12Resource* resource, uint32_t afterSeq, ObservedState* out);
 
 // Global knowledge about which barrier API the game uses per resource

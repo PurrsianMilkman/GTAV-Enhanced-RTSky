@@ -83,7 +83,8 @@ HRESULT STDMETHODCALLTYPE Device_CreateCommandList1(ID3D12Device* self, UINT nod
 {
     using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_COMMAND_LIST_TYPE, D3D12_COMMAND_LIST_FLAGS, REFIID, void**);
     HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateCommandList1, self, nodeMask, type, flags, riid, list);
-    if (SUCCEEDED(hr) && list != nullptr && *list != nullptr && !HookBypass::Active())
+    if (SUCCEEDED(hr) && list != nullptr && *list != nullptr && !HookBypass::Active() &&
+        (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE))
     {
         ComPtr<CL> cl;
         if (SUCCEEDED(static_cast<IUnknown*>(*list)->QueryInterface(IID_PPV_ARGS(&cl))) && !g_list.IsKnownFast(cl.Get()))
@@ -497,19 +498,45 @@ void STDMETHODCALLTYPE Queue_ExecuteCommandLists(ID3D12CommandQueue* self, UINT 
         {
             // Lists whose vtable we have not seen (debug layer, runtime bypass, other classes) are
             // patched now; they are tracked from their next recording on.
-            if (lists[i] != nullptr && !g_list.IsKnownFast(lists[i]) && lists[i]->GetType() != D3D12_COMMAND_LIST_TYPE_COPY &&
-                lists[i]->GetType() != D3D12_COMMAND_LIST_TYPE_BUNDLE)
-            {
+            // Only graphics/compute lists implement ID3D12GraphicsCommandList; video and copy lists
+            // have different vtable layouts and must never be patched with these slots.
+            if (lists[i] == nullptr || g_list.IsKnownFast(lists[i]))
+                continue;
+            const D3D12_COMMAND_LIST_TYPE type = lists[i]->GetType();
+            if (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE)
                 g_list.Patch(lists[i]);
-            }
         }
         track::Analyzer().OnExecute(self, count, lists);
+
+        // RTSky's trace in one of these lists reads a TLAS clone written by a list submitted on
+        // another queue: order this submission after the producer's (already signalled) fence.
+        for (UINT i = 0; i < count; ++i)
+        {
+            const ListState* s = track::FindListState(lists[i]);
+            if (s == nullptr || !s->tlasConsumedValid)
+                continue;
+            const track::TlasInfo& t = s->tlasConsumed;
+            if (t.producerQueue != nullptr && t.producerQueue != self && t.producerFence)
+            {
+                HookBypass bypass;
+                self->Wait(t.producerFence.Get(), t.producerFenceValue);
+            }
+        }
     }
     using Fn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
     Orig<Fn>(g_queue, RTSKY_IDX_Queue_ExecuteCommandLists, self, count, lists);
     if (track)
     {
-        render::Lifetime().OnExecuted(self, count, lists);
+        ComPtr<ID3D12Fence> fence;
+        uint64_t value = 0;
+        const bool signalled = render::Lifetime().OnExecuted(self, count, lists, &fence, &value);
+        // Scene TLAS clones recorded in these lists become visible to other lists only now.
+        for (UINT i = 0; signalled && i < count; ++i)
+        {
+            const ListState* s = track::FindListState(lists[i]);
+            if (s != nullptr && s->tlasProducedValid)
+                track::Tlas().Publish(s->tlasProduced, self, fence.Get(), value);
+        }
         render::Lifetime().Collect();
     }
 }

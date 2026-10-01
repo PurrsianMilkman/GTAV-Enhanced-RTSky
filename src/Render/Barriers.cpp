@@ -70,6 +70,22 @@ D3D12_BARRIER_ACCESS AccessFor(Usage u)
     return D3D12_BARRIER_ACCESS_COMMON;
 }
 
+// Every access a layout allows (used when the game's own access scope was not observed).
+static D3D12_BARRIER_ACCESS AllAccessFor(Usage u)
+{
+    if (u == Usage::DepthWrite)
+        return D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+    return AccessFor(u);
+}
+
+// Sync must be NONE exactly when access is NO_ACCESS.
+static D3D12_BARRIER_SYNC SyncCompatible(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access)
+{
+    if (access == D3D12_BARRIER_ACCESS_NO_ACCESS)
+        return D3D12_BARRIER_SYNC_NONE;
+    return sync == D3D12_BARRIER_SYNC_NONE ? D3D12_BARRIER_SYNC_ALL : sync;
+}
+
 bool UsageFromLayout(D3D12_BARRIER_LAYOUT layout, Usage* out)
 {
     switch (layout)
@@ -154,7 +170,17 @@ static void IssueLegacy(ID3D12GraphicsCommandList* list, ID3D12Resource* resourc
                         D3D12_RESOURCE_STATES after, bool depthPlaneOnly)
 {
     if (before == after)
+    {
+        // Same state: no transition, but UAV accesses on either side still need ordering.
+        if ((after & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) != 0)
+        {
+            D3D12_RESOURCE_BARRIER uav = {};
+            uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            uav.UAV.pResource = resource;
+            list->ResourceBarrier(1, &uav);
+        }
         return;
+    }
     D3D12_RESOURCE_BARRIER b = {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = resource;
@@ -169,8 +195,11 @@ void TransitionGame(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, c
 {
     if (from.enhanced)
     {
-        IssueEnhanced(list, resource, from.layout, SyncFor(from.usage), AccessFor(from.usage), LayoutFor(to), SyncFor(to),
-                      AccessFor(to), depthPlaneOnly);
+        // Wait for whatever the game did since its last barrier: SYNC_ALL before, with the exact
+        // access scope it declared (or every access its layout allows).
+        const D3D12_BARRIER_ACCESS accessBefore = from.scopeObserved ? from.access : AllAccessFor(from.usage);
+        IssueEnhanced(list, resource, from.layout, SyncCompatible(D3D12_BARRIER_SYNC_ALL, accessBefore), accessBefore,
+                      LayoutFor(to), SyncFor(to), AccessFor(to), depthPlaneOnly);
     }
     else
     {
@@ -183,8 +212,11 @@ void RestoreGame(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, Usag
 {
     if (original.enhanced)
     {
+        // Re-open exactly the scope the game's own barrier opened (or the widest one).
+        const D3D12_BARRIER_ACCESS accessAfter = original.scopeObserved ? original.access : AllAccessFor(original.usage);
+        const D3D12_BARRIER_SYNC syncAfter = original.scopeObserved ? original.sync : D3D12_BARRIER_SYNC_ALL;
         IssueEnhanced(list, resource, LayoutFor(current), SyncFor(current), AccessFor(current), original.layout,
-                      SyncFor(original.usage), AccessFor(original.usage), depthPlaneOnly);
+                      SyncCompatible(syncAfter, accessAfter), accessAfter, depthPlaneOnly);
     }
     else
     {

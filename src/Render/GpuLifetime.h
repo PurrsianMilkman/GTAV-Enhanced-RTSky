@@ -32,8 +32,9 @@ public:
     void Attach(track::ListState& state, const Microsoft::WRL::ComPtr<ID3D12DeviceChild>& object);
 
     // After the game's ExecuteCommandLists was forwarded. Signals the fence on `queue` when any of
-    // the lists carries attachments.
-    void OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
+    // the lists carries attachments; returns true and the signalled fence / value in that case.
+    bool OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists,
+                    Microsoft::WRL::ComPtr<ID3D12Fence>* signalledFence = nullptr, uint64_t* signalledValue = nullptr);
 
     // Releases everything whose fence value has completed. Cheap when there is nothing to do.
     void Collect();

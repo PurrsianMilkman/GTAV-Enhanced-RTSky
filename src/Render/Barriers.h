@@ -31,6 +31,13 @@ struct GameResourceState
     // Legacy: the exact D3D12_RESOURCE_STATES the resource is in. Enhanced: the exact layout.
     D3D12_RESOURCE_STATES legacyState = D3D12_RESOURCE_STATE_RENDER_TARGET;
     D3D12_BARRIER_LAYOUT layout = D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+    // Enhanced only: the SyncAfter / AccessAfter of the game's last barrier on the resource in this
+    // list, when one was observed. RTSky's transition waits for that scope and its restore re-opens
+    // exactly that scope for the game's following work. Without an observation, every access the
+    // layout allows is assumed and SYNC_ALL is used.
+    bool scopeObserved = false;
+    D3D12_BARRIER_SYNC sync = D3D12_BARRIER_SYNC_ALL;
+    D3D12_BARRIER_ACCESS access = D3D12_BARRIER_ACCESS_COMMON;
 };
 
 D3D12_RESOURCE_STATES LegacyStateFor(Usage u);
@@ -41,8 +48,9 @@ D3D12_BARRIER_ACCESS AccessFor(Usage u);
 bool UsageFromLayout(D3D12_BARRIER_LAYOUT layout, Usage* out);
 bool UsageFromLegacyState(D3D12_RESOURCE_STATES state, Usage* out);
 
-// Transition of a game resource between two states. `subresource` is a subresource index for legacy
-// barriers, or the plane (0 = depth) for enhanced barriers when planeOnly is true.
+// Transition of a game resource between two states. depthPlaneOnly restricts the barrier to
+// subresource 0 (legacy) / mip 0, slice 0, plane 0 (enhanced); otherwise it covers the whole resource,
+// which RTSky only does for single-subresource targets. A UAV -> UAV "transition" emits a UAV barrier.
 void TransitionGame(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, const GameResourceState& from,
                     Usage to, bool depthPlaneOnly);
 // Returns the resource from `to` back to exactly `original`.

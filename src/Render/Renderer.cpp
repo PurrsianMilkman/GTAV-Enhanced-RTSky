@@ -315,8 +315,6 @@ private:
     uint64_t m_lastTlasSerial = 0;
     int m_tlasReuse = 0;
     uint32_t m_frameIndex = 0;
-    bool m_lutDirty = true;
-    float m_lutKey[2] = { -1.0f, -1.0f };
     std::atomic<bool> m_resetRequested{ true };
     std::vector<std::pair<DXGI_FORMAT, bool>> m_typedUavCache;
 
@@ -985,6 +983,31 @@ void RendererImpl::FillConstants(gpu::FrameConstants& fc, const PendingFrame& f,
     }
 }
 
+// Takes over the state the game's last barrier (on this list) left subresource 0 in. False when
+// RTSky cannot continue from it: unknown state, NO_ACCESS, or a split barrier that has begun but not
+// ended (nothing may touch the subresource in between).
+static bool StateFromObserved(const track::ObservedState& o, GameResourceState* out)
+{
+    if (o.splitPending)
+        return false;
+    out->enhanced = o.enhanced;
+    const bool known = o.enhanced ? UsageFromLayout(static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout), &out->usage)
+                                  : UsageFromLegacyState(static_cast<D3D12_RESOURCE_STATES>(o.stateOrLayout), &out->usage);
+    if (!known)
+        return false;
+    out->legacyState = static_cast<D3D12_RESOURCE_STATES>(o.stateOrLayout);
+    out->layout = static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout);
+    if (o.enhanced)
+    {
+        if (o.accessAfter == D3D12_BARRIER_ACCESS_NO_ACCESS)
+            return false;
+        out->scopeObserved = true;
+        out->sync = o.syncAfter;
+        out->access = o.accessAfter;
+    }
+    return true;
+}
+
 // -------------------------------------------------------------------------------------------------
 // Injection 1: Prepare (end of the G-buffer pass)
 // -------------------------------------------------------------------------------------------------
@@ -1011,16 +1034,11 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
         track::ObservedState o;
         if (track::FindObservedState(state, depth, record.barrierSeqAtLastDraw, &o))
         {
-            depthState.enhanced = o.enhanced;
-            bool known = o.enhanced ? UsageFromLayout(static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout), &depthState.usage)
-                                    : UsageFromLegacyState(static_cast<D3D12_RESOURCE_STATES>(o.stateOrLayout), &depthState.usage);
-            if (!known || (o.subresource != 0xFFFFFFFFu && o.subresource != 0))
+            if (!StateFromObserved(o, &depthState))
             {
-                RTSKY_LOG_ONCE(log::Level::Warning, "Depth was transitioned to an unsupported state before the pass ended; skipping");
+                RTSKY_LOG_ONCE(log::Level::Warning, "Depth was transitioned to an unsupported (or split) state before the pass ended; skipping");
                 return;
             }
-            depthState.legacyState = static_cast<D3D12_RESOURCE_STATES>(o.stateOrLayout);
-            depthState.layout = static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout);
         }
         else
         {
@@ -1193,8 +1211,14 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     if (track::Tlas().OpacityMicromapsSeen() && !(cfg.tracePath == TracePath::Pipeline && m_rtPipeline.AllowsOpacityMicromaps()))
         return skip("the game uses opacity micromaps; only the DXR pipeline path on tier 1.2 can trace them");
 
+    // Scene TLAS: a clone recorded earlier in this very list is ordered by the list itself; otherwise
+    // the newest clone whose producing list was already submitted (the ExecuteCommandLists hook adds
+    // a queue wait when that was on another queue).
     track::TlasInfo tlas;
-    if (!track::Tlas().GetSceneTlas(&tlas))
+    const bool tlasFromThisList = state.tlasProducedValid;
+    if (tlasFromThisList)
+        tlas = state.tlasProduced;
+    else if (!track::Tlas().GetSceneTlas(&tlas))
         return skip("no scene TLAS captured (enable the game's ray tracing)");
     // Never trace a TLAS that is not from (about) this frame: the BLASes it references may be gone.
     if (tlas.buildSerial == m_lastTlasSerial)
@@ -1219,11 +1243,14 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     const D3D12_RESOURCE_DESC targetDesc = ResourceDesc(target);
     if (targetDesc.SampleDesc.Count != 1 || targetDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
         return skip("unsupported HDR target");
+    // Only the bound subresource's state is known; the other mips / slices are in whatever state the
+    // game left them, so whole-resource transitions and copies would be wrong.
+    if (targetDesc.MipLevels != 1 || targetDesc.DepthOrArraySize != 1)
+        return skip("the HDR target has several subresources");
     const DXGI_FORMAT uavFormat = record.rtv[0].viewFormat;
     if (!FormatSupportsTypedUav(uavFormat))
         return skip("the HDR target format does not support typed UAV loads");
-    const bool inPlace = (targetDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 && targetDesc.MipLevels == 1 &&
-                         targetDesc.DepthOrArraySize == 1;
+    const bool inPlace = (targetDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
     std::shared_ptr<SceneCopy> sceneCopy;
     if (!inPlace && !EnsureSceneCopy(targetDesc, &sceneCopy))
         return skip("scene copy unavailable");
@@ -1234,21 +1261,16 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         if (track::FindObservedState(state, target, record.barrierSeqAtLastDraw, &o))
         {
             // The game already moved the target on (e.g. to a shader-read state for the next pass).
-            targetState.enhanced = o.enhanced;
-            const bool known = o.enhanced ? UsageFromLayout(static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout), &targetState.usage)
-                                          : UsageFromLegacyState(static_cast<D3D12_RESOURCE_STATES>(o.stateOrLayout), &targetState.usage);
-            if (!known || o.subresource != 0xFFFFFFFFu)
-                return skip("the HDR target was transitioned to an unsupported state after its last draw");
-            targetState.legacyState = static_cast<D3D12_RESOURCE_STATES>(o.stateOrLayout);
-            targetState.layout = static_cast<D3D12_BARRIER_LAYOUT>(o.stateOrLayout);
+            if (!StateFromObserved(o, &targetState))
+                return skip("the HDR target was transitioned to an unsupported (or split) state after its last draw");
         }
         else
         {
-        const track::BarrierApi api = track::LastBarrierApi(target);
-        targetState.enhanced = api == track::BarrierApi::Enhanced || (api == track::BarrierApi::Unknown && track::GameUsesEnhancedBarriers());
-        targetState.usage = Usage::RenderTarget;
-        targetState.legacyState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        targetState.layout = D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+            const track::BarrierApi api = track::LastBarrierApi(target);
+            targetState.enhanced = api == track::BarrierApi::Enhanced || (api == track::BarrierApi::Unknown && track::GameUsesEnhancedBarriers());
+            targetState.usage = Usage::RenderTarget;
+            targetState.legacyState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            targetState.layout = D3D12_BARRIER_LAYOUT_RENDER_TARGET;
         }
     }
 
@@ -1285,14 +1307,6 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     FillConstants(local, f, reset ? nullptr : &m_lastCompositeCamera, cfg, reset, tlasSpace, f.camera.position, tx, ty, tw, th, srgbTarget);
     std::memcpy(m_constantsMapped + SIZE_T(slot) * kConstantSlotSize, &local, sizeof(local));
 
-    // LUT parameters that require the static LUTs to be rebuilt
-    if (m_lutKey[0] != cfg.mieScale || m_lutKey[1] != cfg.atmosphereGroundAlbedo)
-    {
-        m_lutKey[0] = cfg.mieScale;
-        m_lutKey[1] = cfg.atmosphereGroundAlbedo;
-        m_lutDirty = true;
-    }
-
     // UAV of the composite destination (slot table, UAV half)
     const uint32_t slotBase = SlotTableBase(slot);
     UavTex(slotBase + kTableSrv, inPlace ? target : sceneCopy->resource.Get(), uavFormat);
@@ -1306,8 +1320,9 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     const uint32_t p = f.parity;
     BeginPasses(list, slot, tlas.address);
 
-    // Atmosphere
-    if (m_lutDirty)
+    // Atmosphere. The transmittance / multi-scattering LUTs are tiny (16K + 1K threads) and are
+    // rebuilt every frame: a "built once" flag set at record time would be wrong if that list were
+    // never submitted, and they follow the INI parameters without any invalidation logic.
     {
         own.Use(m_transmittance.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         own.Flush(list);
@@ -1319,7 +1334,6 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         Run(list, Pso::MultiScatter, kGlobalBase + GT_MultiScatter * kTableSize, kGlobalBase + GT_MultiScatter * kTableSize + kTableSrv,
             RTSKY_MULTISCATTER_SIZE, RTSKY_MULTISCATTER_SIZE, 1);
         own.Use(m_multiScatter.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        m_lutDirty = false;
     }
     own.Use(m_skyView.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     own.Flush(list);
@@ -1411,8 +1425,12 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         track::RestoreState(list, state);
         Lifetime().Attach(state, slotHandle);
         Lifetime().Attach(state, std::static_pointer_cast<void>(f.set));
-        if (tlas.cloneBuffer)
-            Lifetime().Attach(state, tlas.cloneBuffer);
+        Lifetime().Attach(state, tlas.cloneHolder);
+        if (!tlasFromThisList)
+        {
+            state.tlasConsumed = tlas;
+            state.tlasConsumedValid = true;
+        }
         m_lastTlasSerial = tlas.buildSerial;
         m_lastCompositePrepareSerial = f.prepareSerial;
         m_lastCompositeCamera = f.camera;
@@ -1461,8 +1479,12 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     // Keep everything the GPU will touch alive until this list has executed.
     Lifetime().Attach(state, slotHandle);
     Lifetime().Attach(state, std::static_pointer_cast<void>(f.set));
-    if (tlas.cloneBuffer)
-        Lifetime().Attach(state, tlas.cloneBuffer);
+    Lifetime().Attach(state, tlas.cloneHolder);
+    if (!tlasFromThisList)
+    {
+        state.tlasConsumed = tlas;
+        state.tlasConsumedValid = true;
+    }
     if (sceneCopy)
         Lifetime().Attach(state, std::static_pointer_cast<void>(sceneCopy));
 
@@ -1520,6 +1542,13 @@ void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, c
     const bool composite = !state.injectedComposite && analyzer.MatchComposite(state, record);
     if (!prepare && !composite)
         return;
+    if (record.noInjectAfter)
+    {
+        // A suspending render pass (resumed by the next one) or PRESERVE_LOCAL ending accesses: no
+        // other command may be recorded before the pass continues.
+        RTSKY_LOG_ONCE(log::Level::Warning, "The matched pass suspends / preserves its render pass; cannot inject after it");
+        return;
+    }
 
     const Config cfg = ConfigSnapshot();
     if (!cfg.enabled)
