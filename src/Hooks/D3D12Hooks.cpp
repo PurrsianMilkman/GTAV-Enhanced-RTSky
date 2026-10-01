@@ -581,7 +581,7 @@ void STDMETHODCALLTYPE Queue_ExecuteCommandLists(ID3D12CommandQueue* self, UINT 
         for (UINT i = 0; i < count; ++i)
             PatchList(lists[i]);
         track::Analyzer().OnExecute(self, count, lists);
-        render::OnListsExecuted(count, lists);
+        render::OnSubmit(self, count, lists);
 
         for (UINT i = 0; i < count; ++i)
         {

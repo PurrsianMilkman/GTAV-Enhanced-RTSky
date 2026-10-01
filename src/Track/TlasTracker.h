@@ -55,7 +55,9 @@ public:
     // (NoteConsumerQueue). The last few published clones are kept, so a producer on another queue
     // that is always a frame or two ahead still yields a fresh, completed clone each frame. Fails if
     // there is none.
-    bool GetSceneTlas(TlasInfo* out);
+    bool GetSceneTlas(TlasInfo* out) { return GetSceneTlas(out, nullptr); }
+    // The same for a known consumer queue (nullptr = the last queue noted by NoteConsumerQueue).
+    bool GetSceneTlas(TlasInfo* out, ID3D12CommandQueue* consumerQueue);
 
     // The queue on which lists carrying RTSky's composite were last submitted.
     void NoteConsumerQueue(ID3D12CommandQueue* queue);

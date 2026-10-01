@@ -148,6 +148,7 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     tlasProduced = TlasInfo{};
     tlasConsumedValid = false;
     tlasConsumed = TlasInfo{};
+    tlasDescriptor = -1;
     stateUnknown = false;
     injectedPrepare = false;
     injectedComposite = false;

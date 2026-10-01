@@ -146,6 +146,9 @@ struct ListState
     // the ExecuteCommandLists hook makes the submitting queue wait for the producer's fence.
     bool tlasConsumedValid = false;
     TlasInfo tlasConsumed;
+    // Heap index of the TLAS descriptor RTSky's trace in this list reads, still to be upgraded at
+    // submission (render::OnSubmit); -1 = none / done.
+    int32_t tlasDescriptor = -1;
 
     // Statistics for the frame dump
     uint32_t tlasBuilds = 0;

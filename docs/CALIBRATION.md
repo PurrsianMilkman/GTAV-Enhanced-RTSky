@@ -59,8 +59,11 @@ counts these (`paired late`), and the log warns once.
 
 * `no scene TLAS captured (enable the game's ray tracing)`: no top-level BVH build was seen. Enable
   any RT effect.
-* `the scene TLAS was not rebuilt`: RTSky never traces a BVH from an older frame, because the geometry
-  it references may already be freed.
+* `the scene TLAS was not rebuilt`: RTSky never traces the same BVH twice in a row, because the
+  geometry it references may already be freed. It traces the newest BVH that is guaranteed to have
+  been built before its trace on the GPU. That is normally the current frame's, bound when the game
+  submits the frame (`TLAS bound at submit` in the status line). With a TLAS built on async compute
+  it can be the previous frame's.
 * `the game uses opacity micromaps`: only the DXR pipeline path on a tier 1.2 GPU can trace them. The
   calibration probe uses inline ray queries, which cannot, so it is disabled: set `Latency` and
   `TlasSpace` explicitly (section 4) to enable relighting.

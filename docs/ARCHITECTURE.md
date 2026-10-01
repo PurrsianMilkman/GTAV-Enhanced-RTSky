@@ -131,11 +131,20 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   - a clone stays private to its list until that list is **submitted**; the ExecuteCommandLists hook
     then publishes it with the queue and the `GpuLifetime` fence value of the submission;
   - Composite prefers a clone recorded earlier in its own list (ordered by the list). Otherwise it
-    binds the newest published clone that was produced on the queue running the composite (ordered
-    by submission) or whose producing submission has already completed. RTSky never makes one queue
-    wait for another, which could deadlock with the game's own cross-queue waits. If the composite
-    list moves to a different queue after its clone was chosen, the ExecuteCommandLists hook inserts
-    one `Wait` on the producer's already-signalled fence and logs it;
+    binds, provisionally, the newest published clone that was produced on the queue running the
+    composite (ordered by submission) or whose producing submission has already completed;
+  - the TLAS is bound through a per-slot descriptor (descriptor table, `DESCRIPTORS_VOLATILE`), not
+    a root SRV. When the list is submitted, the ExecuteCommandLists hook knows the GPU order and
+    rewrites the descriptor with the newest clone that runs before it: one written by an earlier list
+    of the same submission, or one submitted earlier on the same queue. A frame whose TLAS is built
+    in a separate list submitted together with (or before) the lighting list therefore traces its
+    own BVH. Only an async-compute build that has not completed yet leaves the previous frame's;
+  - RTSky never makes one queue wait for another, which could deadlock with the game's own
+    cross-queue waits. If the composite list moves to a different queue after its clone was chosen,
+    the ExecuteCommandLists hook inserts one `Wait` on the producer's already-signalled fence and
+    logs it;
+  - the last 4 published clones are remembered without pinning ring slots; a slot generation
+    counter tells whether a remembered clone still exists;
   - if a clone cannot be made (out of memory) the frame is not traced; the game's own TLAS memory is
     never bound, because it may be rebuilt or reallocated while the trace runs;
   - a ring slot is rewritten only when no list that wrote or reads it can still be in flight (each
@@ -164,7 +173,8 @@ readback ring. Injections are skipped until it is ready.
 
 ### 5.2 Binding model
 One root signature serves every compute pass and is the DXR global root signature: root CBV b0
-(`FrameConstants` slot), root SRV t0/space1 (TLAS clone), 8 root constants b1 (`PassConstants`), a
+(`FrameConstants` slot), a one-descriptor table t0/space1 (TLAS clone, late-bound), 8 root
+constants b1 (`PassConstants`), a
 12-SRV table (t0–t11) and an 8-UAV table (u0–u7), plus static linear and point samplers. The
 shader-visible heap holds:
 * 64 **slot tables**, one per injection in flight, for views of game resources (game depth SRV,

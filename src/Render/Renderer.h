@@ -18,8 +18,9 @@ namespace rtsky::render {
 // Called by the hooks when a render-target binding closes (see track::CloseBinding).
 void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, const track::BindingRecord& record);
 
-// Called by the ExecuteCommandLists hook (GPU order): Prepare / Composite pairing check.
-void OnListsExecuted(UINT count, ID3D12CommandList* const* lists);
+// Called by the ExecuteCommandLists hook before the lists are forwarded (GPU order is known):
+// late TLAS binding and the Prepare / Composite pairing check.
+void OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 
 // Called once per ScriptHookV tick (game thread): periodic logging.
 void OnScriptTick();
