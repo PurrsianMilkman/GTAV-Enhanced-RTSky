@@ -33,6 +33,10 @@ public:
     // count then work within the pinned row / column, and Latency() / TlasSpace() return the pin.
     void SetPinned(int latency, int space);
     std::string Describe() const;
+    // Forgets every score (hotkey "reset"); pinned values stay.
+    void Reset();
+    // Probe pixels with a usable depth (0..64) in the last submission, -1 before the first.
+    int LastProbePixels() const;
 
 private:
     mutable SRWLOCK m_lock = SRWLOCK_INIT;
@@ -44,6 +48,7 @@ private:
     int m_pinnedLatency = -1;
     int m_pinnedSpace = -1;
     uint64_t m_submissions = 0;
+    int m_lastPixels = -1;
 };
 
 } // namespace rtsky::render

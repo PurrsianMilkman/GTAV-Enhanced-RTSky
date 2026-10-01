@@ -8,7 +8,7 @@ valuable contribution right now**, followed by fixes that come out of it.
 ## Ways to help
 
 * **Test it in game** and open an issue with the *In-game test report* template. Attach `RTSky.log`
-  and `RTSky_frame.log` (Ctrl+F11). Reports from different GPUs (NVIDIA / AMD / Intel), drivers and
+  and `RTSky_frame.log` (Num .), plus a screenshot of the on-screen status lines. Reports from different GPUs (NVIDIA / AMD / Intel), drivers and
   game settings are all useful, including "it does nothing" reports: the log says why.
 * **Tune the detection and look** for the real game: `CompositeCandidate`, the ordinals, depth mode,
   default strengths. Frame dumps from real frames are what this needs.

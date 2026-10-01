@@ -79,7 +79,7 @@ jobs:
 
           **Install:** copy ``RTSky.asi`` and ``RTSky.ini`` into the game folder next to ScriptHookV and its ASI loader. Ray tracing must be enabled in the game. See README.md in the zip.
 
-          **Testing:** after a minute of gameplay, press Ctrl+F11 and open an *In-game test report* issue with ``RTSky.log`` and ``RTSky_frame.log`` attached.
+          **Testing:** after a minute of gameplay, press Numpad . (NumLock on) and open an *In-game test report* issue with ``RTSky.log``, ``RTSky_frame.log`` and a screenshot of the status lines (top left) attached. **Hotkeys:** Numpad 1 toggles RTSky, Numpad 3 splits the screen (left original, right RTSky), Numpad 4 forces relighting while calibrating; see the README for the rest.
           "@
           # --target creates the tag on this commit when it does not exist yet (workflow_dispatch).
           gh release create $tag @assets --target $env:GITHUB_SHA --title "RTSky $tag" --notes $notes @flags

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace rtsky {
@@ -17,11 +18,31 @@ struct Config
     bool enabled = true;
     int logLevel = 2; // 0 error, 1 warning, 2 info, 3 debug
 
-    // [Hotkeys] (virtual-key codes; Ctrl modifier for reload / dump)
-    int keyToggle = 0x79;      // F10
-    int keyDebugView = 0x7A;   // F11
-    int keyReload = 0x79;      // Ctrl+F10
-    int keyDumpFrame = 0x7A;   // Ctrl+F11
+    // [Hotkeys] virtual-key codes (the INI also accepts names such as Numpad1, NumpadAdd, F10).
+    // Numpad digits need NumLock on.
+    int keyToggle = 0x61;       // Numpad1: RTSky on / off
+    int keyOverlay = 0x62;      // Numpad2: on-screen status
+    int keyCompare = 0x63;      // Numpad3: split-screen compare (left original, right RTSky)
+    int keyForceRelight = 0x64; // Numpad4: relight even while calibration has not passed
+    int keyDebugView = 0x65;    // Numpad5: next debug view
+    int keySunShadows = 0x66;   // Numpad6: sun / moon shadow rays
+    int keyFoliage = 0x67;      // Numpad7: foliage mode
+    int keyNearField = 0x68;    // Numpad8: near-field split
+    int keyTracePath = 0x69;    // Numpad9: DXR pipeline / inline ray query
+    int keyReload = 0x60;       // Numpad0: reload RTSky.ini
+    int keyDumpFrame = 0x6E;    // Numpad . : frame dump
+    int keyStrengthUp = 0x6B;   // Numpad + : strength +0.1
+    int keyStrengthDown = 0x6D; // Numpad - : strength -0.1
+    int keyDenoiser = 0x6A;     // Numpad * : spatial denoiser
+    int keyReset = 0x6F;        // Numpad / : reset history and calibration
+
+    // [Display]
+    bool overlay = true;        // on-screen status lines (top left)
+    bool compareSplit = false;  // left half of the screen untouched, right half relit
+
+    // Runtime toggles (hotkeys only; a reload restores the INI values)
+    bool nearField = true;      // false: NearFieldRadius treated as 0
+    bool denoiser = true;       // false: no a-trous iterations
 
     // [Trace]
     TracePath tracePath = TracePath::Pipeline;
@@ -69,6 +90,7 @@ struct Config
     float fovScale = 1.0f;
     bool calibrationProbe = true;
     float minCalibrationScore = 0.35f; // relighting starts once the probe agrees this well
+    bool forceRelight = false;         // relight even while the calibration has not passed
 
     // [Detection]
     int gbufferOrdinal = -1;       // -1 auto, else ordinal of the MRT binding in its command list
@@ -99,5 +121,7 @@ bool ReloadConfig();
 void SetConfigPath(const std::wstring& path);
 void SetConfigDebugView(int view);
 void SetConfigEnabled(bool enabled);
+// Applies a change to the live configuration (hotkeys); returns the updated copy.
+Config UpdateConfig(const std::function<void(Config&)>& edit);
 
 } // namespace rtsky

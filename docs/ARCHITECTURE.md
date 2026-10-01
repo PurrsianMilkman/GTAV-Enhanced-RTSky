@@ -160,7 +160,7 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   earlier in the same list is added as a discriminator; if that is still ambiguous, nothing is
   armed. Rules arm after `StableFrames` identical frames and disarm when the structure changes
   (menus, loading: a phase that grows past 64 bindings without lighting). The depth clear value of
-  the G-buffer depth (0 or 1) decides reversed or standard Z. Ctrl+F11 dumps one frame.
+  the G-buffer depth (0 or 1) decides reversed or standard Z. Num . dumps one frame.
   `tests/AnalyzerTests.cpp` runs these scenarios against the real sources.
 
 ## 5. Renderer (`src/Render`)
@@ -302,5 +302,7 @@ into a 16-entry seqlock ring, along with the clock, `GET_CURR_WEATHER_STATE`, ra
 interior, pause, cutscene and loading flags.
 
 ## 9. Configuration
-`RTSky.ini` sits next to the ASI and is reloaded with Ctrl+F10; every key is documented there.
-Hotkeys: F10 toggles, F11 cycles debug views, Ctrl+F10 reloads, Ctrl+F11 dumps a frame.
+`RTSky.ini` sits next to the ASI and is reloaded with Num 0; every key is documented there.
+Hotkeys are on the numpad (Num 1 toggles RTSky; the rest switch individual features, see the README).
+The script thread draws status lines and hotkey confirmations with the game's UI text natives
+(`src/Game/Overlay.cpp`).

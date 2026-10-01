@@ -27,6 +27,7 @@ void Calibration::Submit(const uint32_t* results, bool informative)
 {
     AcquireSRWLockExclusive(&m_lock);
     ++m_submissions;
+    m_lastPixels = static_cast<int>(results[2 * kLatencies * kSpaces]);
     for (int l = 0; l < kLatencies; ++l)
     {
         for (int s = 0; s < kSpaces; ++s)
@@ -131,6 +132,31 @@ bool Calibration::HasData(int latency, int space) const
         return false;
     AcquireSRWLockShared(&m_lock);
     bool v = m_samples[latency][space] >= 5;
+    ReleaseSRWLockShared(&m_lock);
+    return v;
+}
+
+void Calibration::Reset()
+{
+    AcquireSRWLockExclusive(&m_lock);
+    for (int l = 0; l < kLatencies; ++l)
+    {
+        for (int s = 0; s < kSpaces; ++s)
+        {
+            m_score[l][s] = 0.0f;
+            m_samples[l][s] = 0;
+        }
+    }
+    m_switchVotes = 0;
+    m_submissions = 0;
+    m_lastPixels = -1;
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+int Calibration::LastProbePixels() const
+{
+    AcquireSRWLockShared(&m_lock);
+    const int v = m_lastPixels;
     ReleaseSRWLockShared(&m_lock);
     return v;
 }
