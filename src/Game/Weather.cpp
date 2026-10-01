@@ -8,6 +8,8 @@
 
 #include "../Common/Math.h"
 
+#include <algorithm>
+
 namespace rtsky::game {
 namespace {
 

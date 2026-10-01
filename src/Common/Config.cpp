@@ -188,6 +188,7 @@ bool Config::Load(const std::wstring& path)
     }
     r.Get("camera.fovscale", fovScale);
     r.Get("camera.calibrationprobe", calibrationProbe);
+    r.Get("camera.mincalibrationscore", minCalibrationScore);
 
     r.GetAutoInt("detection.gbufferordinal", gbufferOrdinal, -1);
     r.Get("detection.compositecandidate", compositeCandidate);

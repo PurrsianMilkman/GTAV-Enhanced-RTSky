@@ -1402,6 +1402,27 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         list->CopyBufferRegion(m_readback.Get(), UINT64(slot) * kReadbackSlotSize, m_probeBuffer.Get(), 0, kProbeUints * sizeof(uint32_t));
     }
 
+    // Until the probe has confirmed the camera / TLAS-space hypothesis, the occlusion could be
+    // garbage: keep tracing (the probe needs it) but leave the game's image untouched.
+    const bool calibrated = !calibrating || (m_calibration.HasData() && m_calibration.Confidence() >= cfg.minCalibrationScore);
+    if (!calibrated && cfg.debugView == RTSKY_VIEW_NONE)
+    {
+        own.Rest(list);
+        track::RestoreState(list, state);
+        Lifetime().Attach(state, slotHandle);
+        Lifetime().Attach(state, std::static_pointer_cast<void>(f.set));
+        if (tlas.cloneBuffer)
+            Lifetime().Attach(state, tlas.cloneBuffer);
+        m_lastTlasSerial = tlas.buildSerial;
+        m_lastCompositePrepareSerial = f.prepareSerial;
+        m_lastCompositeCamera = f.camera;
+        m_lastCompositeSet = &set;
+        RTSKY_LOG_ONCE(log::Level::Info, "Calibrating camera / TLAS space before relighting (see the status line in RTSky.log)");
+        m_lastSkip = "calibrating";
+        ReleaseSRWLockExclusive(&m_lock);
+        return;
+    }
+
     // Composite into the game's HDR target
     gpu::PassConstants none = {};
     const uint32_t compBase = SetTableBase(set, compositeTable + p);
