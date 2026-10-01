@@ -164,6 +164,64 @@ ListState* FindListState(ID3D12CommandList* list)
     return s;
 }
 
+// Destruction watch: a private-data interface the runtime releases when the list object dies. The
+// ListState itself stays allocated (thread-local caches may still point at it and the address can be
+// reused by a new list), but everything it keeps alive is dropped: without this, a list the game
+// destroys after executing it would pin its slot, resource set and TLAS clone forever.
+const GUID kListWatchGuid = { 0x5e1c7a3b, 0x2f4d, 0x4c8e, { 0x9a, 0x61, 0x3d, 0x27, 0xb4, 0x10, 0xe8, 0x52 } };
+
+class ListDeathWatch final : public IUnknown
+{
+public:
+    explicit ListDeathWatch(ID3D12CommandList* list) : m_list(list) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override
+    {
+        if (out == nullptr)
+            return E_POINTER;
+        if (riid == __uuidof(IUnknown))
+        {
+            *out = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return m_refs.fetch_add(1) + 1; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG left = m_refs.fetch_sub(1) - 1;
+        if (left == 0)
+        {
+            OnListDestroyed(m_list);
+            delete this;
+        }
+        return left;
+    }
+
+private:
+    static void OnListDestroyed(ID3D12CommandList* list)
+    {
+        ListState* s = FindListState(list);
+        if (s == nullptr)
+            return;
+        std::vector<std::shared_ptr<void>> drop;
+        drop.swap(s->attachments);
+        s->tlasProducedValid = false;
+        s->tlasProduced = TlasInfo{};
+        s->tlasConsumedValid = false;
+        s->tlasConsumed = TlasInfo{};
+        s->log.clear();
+        s->observed.clear();
+        s->sawReset = false;
+        // `drop` is released here (outside any lock): GPU-lifetime batches hold their own copies.
+    }
+
+    std::atomic<ULONG> m_refs{ 1 };
+    ID3D12CommandList* m_list;
+};
+
 ListState* GetListState(ID3D12GraphicsCommandList* list)
 {
     if (list == t_cachedList)
@@ -180,6 +238,13 @@ ListState* GetListState(ID3D12GraphicsCommandList* list)
         auto [it, inserted] = g_lists->emplace(list, std::move(fresh));
         s = it->second.get();
         ReleaseSRWLockExclusive(&g_listLock);
+        if (inserted)
+        {
+            // The runtime AddRefs the watch and releases it when the list is destroyed.
+            ListDeathWatch* watch = new ListDeathWatch(list);
+            list->SetPrivateDataInterface(kListWatchGuid, watch);
+            watch->Release();
+        }
     }
     t_cachedList = list;
     t_cachedState = s;
@@ -193,6 +258,7 @@ void OnReset(ListState& s, ID3D12PipelineState* initialPso)
 {
     s.type = s.list->GetType();
     s.ResetForRecording(initialPso);
+    s.sawReset = true;
 }
 
 const BindingRecord* CloseBinding(ListState& s)

@@ -100,6 +100,10 @@ struct ListState
     ID3D12GraphicsCommandList* list = nullptr;
     D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     uint64_t resetSerial = 0;
+    // True once a Reset (or the creation of an open list) was observed. A list first seen in the
+    // middle of a recording has an unknown root / heap state that RestoreState could not restore,
+    // so RTSky never injects into it before its next Reset.
+    bool sawReset = false;
 
     // Pipeline: the last of SetPipelineState / SetPipelineState1 wins.
     enum class PipelineKind : uint8_t { None, Pso, StateObject };

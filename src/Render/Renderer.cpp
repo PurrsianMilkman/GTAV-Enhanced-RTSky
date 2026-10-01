@@ -312,6 +312,10 @@ private:
     uint64_t m_lastCompositePrepareSerial = 0;
     CameraFrame m_lastCompositeCamera;
     const ResourceSet* m_lastCompositeSet = nullptr;
+    UINT m_lastCompositeTraceW = 0;
+    UINT m_lastCompositeTraceH = 0;
+    ULONGLONG m_setRetryAt = 0;      // screen-resource allocation backoff (GetTickCount64)
+    ULONGLONG m_sceneCopyRetryAt = 0; // scene-copy allocation backoff
     uint64_t m_lastTlasSerial = 0;
     int m_tlasReuse = 0;
     uint32_t m_frameIndex = 0;
@@ -329,8 +333,10 @@ private:
 
 RendererImpl& Instance()
 {
-    static RendererImpl instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static RendererImpl* instance = new RendererImpl();
+    return *instance;
 }
 
 ResourceSet::~ResourceSet()
@@ -346,7 +352,23 @@ bool RendererImpl::EnsureReady(ID3D12GraphicsCommandList* list)
 {
     InitState s = m_init.load(std::memory_order_acquire);
     if (s == InitState::Ready)
+    {
+        // Everything RTSky records references objects of one device. A list of another device (the
+        // game recreated its device) or a removed device ends RTSky for this session.
+        ComPtr<ID3D12Device> listDevice;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&listDevice))) || listDevice.Get() != static_cast<ID3D12Device*>(m_device.Get()))
+        {
+            RTSKY_LOG_ONCE(log::Level::Warning, "Command list of another D3D12 device (device recreated?): RTSky stops injecting until the game restarts");
+            return false;
+        }
+        if (m_device->GetDeviceRemovedReason() != S_OK)
+        {
+            LOG_ERROR("The D3D12 device was removed (0x%08X): RTSky stops injecting", static_cast<unsigned>(m_device->GetDeviceRemovedReason()));
+            m_init.store(InitState::Failed);
+            return false;
+        }
         return true;
+    }
     if (s != InitState::NotStarted)
         return false;
 
@@ -611,24 +633,34 @@ std::shared_ptr<ResourceSet> RendererImpl::CreateSet(UINT w, UINT h)
     set->region = region;
     set->width = w;
     set->height = h;
+    // Stop at the first failure (out of video memory): trying the remaining full-screen textures
+    // would only make it worse.
     bool ok = true;
+    auto make = [&](ComPtr<ID3D12Resource>& r, DXGI_FORMAT fmt, const wchar_t* name) {
+        if (ok)
+            ok = (r = CreateTexture(w, h, fmt, name)) != nullptr;
+    };
     for (int i = 0; i < 2; ++i)
     {
-        ok &= (set->linearDepth[i] = CreateTexture(w, h, kFmtDepth, L"RTSky linear depth")) != nullptr;
-        ok &= (set->normal[i] = CreateTexture(w, h, kFmtNormal, L"RTSky normal")) != nullptr;
-        ok &= (set->histS[i] = CreateTexture(w, h, kFmtColor, L"RTSky history S")) != nullptr;
-        ok &= (set->histU[i] = CreateTexture(w, h, kFmtColor, L"RTSky history U")) != nullptr;
-        ok &= (set->histMeta[i] = CreateTexture(w, h, kFmtColor, L"RTSky history meta")) != nullptr;
-        ok &= (set->filtS[i] = CreateTexture(w, h, kFmtColor, L"RTSky filter S")) != nullptr;
-        ok &= (set->filtU[i] = CreateTexture(w, h, kFmtColor, L"RTSky filter U")) != nullptr;
+        make(set->linearDepth[i], kFmtDepth, L"RTSky linear depth");
+        make(set->normal[i], kFmtNormal, L"RTSky normal");
+        make(set->histS[i], kFmtColor, L"RTSky history S");
+        make(set->histU[i], kFmtColor, L"RTSky history U");
+        make(set->histMeta[i], kFmtColor, L"RTSky history meta");
+        make(set->filtS[i], kFmtColor, L"RTSky filter S");
+        make(set->filtU[i], kFmtColor, L"RTSky filter U");
     }
-    ok &= (set->traceS = CreateTexture(w, h, kFmtColor, L"RTSky trace S")) != nullptr;
-    ok &= (set->traceU = CreateTexture(w, h, kFmtColor, L"RTSky trace U")) != nullptr;
+    make(set->traceS, kFmtColor, L"RTSky trace S");
+    make(set->traceU, kFmtColor, L"RTSky trace U");
     if (!ok)
     {
-        LOG_ERROR("Allocation of %ux%u screen resources failed", w, h);
+        // Retry in 5 s, and only log the first failure of a streak.
+        if (m_setRetryAt == 0 || GetTickCount64() > m_setRetryAt + 60000)
+            LOG_ERROR("Allocation of %ux%u screen resources failed (out of video memory?) - retrying every 5 s", w, h);
+        m_setRetryAt = GetTickCount64() + 5000;
         return nullptr; // destructor returns the region
     }
+    m_setRetryAt = 0;
     WriteSetTables(*set);
     LOG_INFO("Screen resources created: %ux%u (descriptor region %u)", w, h, region);
     return set;
@@ -650,6 +682,8 @@ bool RendererImpl::EnsureSceneCopy(const D3D12_RESOURCE_DESC& gameDesc, std::sha
         *out = m_sceneCopy;
         return true;
     }
+    if (GetTickCount64() < m_sceneCopyRetryAt)
+        return false;
     D3D12_RESOURCE_DESC desc = gameDesc;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     desc.Alignment = 0;
@@ -660,7 +694,9 @@ bool RendererImpl::EnsureSceneCopy(const D3D12_RESOURCE_DESC& gameDesc, std::sha
     if (FAILED(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                  nullptr, IID_PPV_ARGS(&copy->resource))))
     {
-        LOG_ERROR("Scene copy allocation failed");
+        if (m_sceneCopyRetryAt == 0)
+            LOG_ERROR("Scene copy allocation failed (out of video memory?) - retrying every 5 s");
+        m_sceneCopyRetryAt = GetTickCount64() + 5000;
         return false;
     }
     copy->resource->SetName(L"RTSky scene copy");
@@ -1073,9 +1109,21 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
 
     AcquireSRWLockExclusive(&m_lock);
 
-    if (!m_set || m_set->width != w || m_set->height != h)
+    // Screen resources are sized to the depth TEXTURE; the trace covers the viewport inside it. With
+    // dynamic resolution the viewport changes often and only the history is reset (Composite sees the
+    // trace size change), nothing is reallocated.
+    const UINT texW = static_cast<UINT>(record.dsv.width);
+    const UINT texH = record.dsv.height;
+    if (!m_set || m_set->width != texW || m_set->height != texH)
     {
-        std::shared_ptr<ResourceSet> fresh = CreateSet(w, h);
+        const ULONGLONG now = GetTickCount64();
+        if (now < m_setRetryAt)
+        {
+            m_lastSkip = "screen resource allocation failed recently";
+            ReleaseSRWLockExclusive(&m_lock);
+            return;
+        }
+        std::shared_ptr<ResourceSet> fresh = CreateSet(texW, texH);
         if (!fresh)
         {
             m_lastSkip = "screen resources not available yet";
@@ -1285,7 +1333,8 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
 
     // History validity
     bool reset = m_resetRequested.exchange(false);
-    if (m_lastCompositeSet != &set || f.prepareSerial != m_lastCompositePrepareSerial + 1 || !m_lastCompositeCamera.valid)
+    if (m_lastCompositeSet != &set || f.prepareSerial != m_lastCompositePrepareSerial + 1 || !m_lastCompositeCamera.valid ||
+        f.traceW != m_lastCompositeTraceW || f.traceH != m_lastCompositeTraceH)
         reset = true;
     if (m_lastCompositeCamera.valid)
     {
@@ -1442,6 +1491,8 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         m_lastCompositePrepareSerial = f.prepareSerial;
         m_lastCompositeCamera = f.camera;
         m_lastCompositeSet = &set;
+        m_lastCompositeTraceW = f.traceW;
+        m_lastCompositeTraceH = f.traceH;
         RTSKY_LOG_ONCE(log::Level::Info, "Calibrating camera / TLAS space before relighting (see the status line in RTSky.log)");
         m_lastSkip = "calibrating";
         ReleaseSRWLockExclusive(&m_lock);
@@ -1499,6 +1550,8 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     m_lastCompositePrepareSerial = f.prepareSerial;
     m_lastCompositeCamera = f.camera;
     m_lastCompositeSet = &set;
+    m_lastCompositeTraceW = f.traceW;
+    m_lastCompositeTraceH = f.traceH;
     ++m_composites;
     if (m_composites.load() == 1)
         LOG_INFO("First Composite injection recorded (%s, %s, target format %d, %ux%u)", usePipeline ? "DXR pipeline" : "inline RayQuery",
@@ -1544,6 +1597,8 @@ void RendererImpl::ScriptTick()
 // -------------------------------------------------------------------------------------------------
 void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, const track::BindingRecord& record)
 {
+    if (!state.sawReset)
+        return; // root / heap state unknown (list first seen mid-recording)
     const track::FrameAnalyzer& analyzer = track::Analyzer();
     const bool prepare = !state.injectedPrepare && analyzer.MatchPrepare(state, record);
     const bool composite = !state.injectedComposite && analyzer.MatchComposite(state, record);

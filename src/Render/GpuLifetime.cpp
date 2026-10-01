@@ -28,16 +28,17 @@ void GpuLifetime::Attach(track::ListState& state, const ComPtr<ID3D12DeviceChild
 
 GpuLifetime::QueueTimeline* GpuLifetime::TimelineFor(ID3D12CommandQueue* queue)
 {
-    for (auto& t : m_timelines)
-    {
-        if (t->queue == queue)
-            return t.get();
-    }
     ComPtr<ID3D12Device> device;
     if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))))
         return nullptr;
+    for (auto& t : m_timelines)
+    {
+        if (t->queue == queue && t->device == device.Get())
+            return t.get();
+    }
     auto timeline = std::make_unique<QueueTimeline>();
     timeline->queue = queue;
+    timeline->device = device.Get();
     {
         hooks::HookBypass bypass;
         if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&timeline->fence))))
@@ -138,8 +139,10 @@ size_t GpuLifetime::PendingBatches() const
 
 GpuLifetime& Lifetime()
 {
-    static GpuLifetime instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static GpuLifetime* instance = new GpuLifetime();
+    return *instance;
 }
 
 } // namespace rtsky::render
