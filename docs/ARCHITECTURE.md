@@ -76,11 +76,24 @@ tests/MathTests.cpp             host tests: camera basis, sun orbit, weather
 Slot indices are not hand-counted. `VTableIndices.c` is compiled as C and derives
 `offsetof(<Iface>Vtbl, Method) / sizeof(void*)` from the SDK's C interface definitions, with
 `_Static_assert`s on known values. `VTableHook` keeps one table of originals per distinct vtable:
-* the ExecuteCommandLists hook patches unseen command-list vtables lazily (debug layer, runtime-bypass vtables);
-* `VerifyHooks()` (every 2 s) re-applies slots that were overwritten, adopting the new pointer as the original.
+* the ExecuteCommandLists hook patches unseen command-list vtables lazily (debug layer, runtime-bypass
+  vtables), but only DIRECT/COMPUTE lists that implement `ID3D12GraphicsCommandList7` on the same
+  pointer, because RTSky writes slots up to `Barrier`. Other classes are remembered and left alone;
+* a hook entered through a vtable RTSky never patched (a copy of a patched one) adopts it on the
+  spot. Runtime/driver entries become its originals, anything else falls back to the first table,
+  so a hook never calls null;
+* `VerifyHooks()` (every 2 s) re-applies slots that were overwritten, adopting the new pointer as the
+  original only if it lies in the D3D12 runtime or a GPU driver. A third-party hook on top of RTSky
+  is left chained;
+* slot writes share one process-wide lock and only make the page `PAGE_READWRITE`;
+* if installation fails halfway (old runtime), everything is unpatched again.
+
+The module pins itself in `DllMain`, and the singletons are never destroyed: hooks, the loader
+notification and GPU-lifetime deleters may still run at process exit.
 
 Hooked: device `CreateCommandList(1)`, `Create{ShaderResource,RenderTarget,DepthStencil}View`,
-`CopyDescriptors(Simple)`. Command list: `Close`, `Reset`, `Draw(Indexed)Instanced`, `ExecuteIndirect`,
+`CopyDescriptors(Simple)`, `CreateCommandSignature` (an indirect execution counts as a draw only when
+its signature draws). Command list: `Close`, `Reset`, `Draw(Indexed)Instanced`, `ExecuteIndirect`, `ExecuteBundle`,
 `RSSetViewports`, `SetPipelineState(1)`, `ResourceBarrier`, `Barrier`, `SetDescriptorHeaps`, all root
 signature and root argument setters, `OMSetRenderTargets`, `ClearDepthStencilView`,
 `Begin/EndRenderPass`, `BuildRaytracingAccelerationStructure`, `DispatchRays`. Queue: `ExecuteCommandLists`.
@@ -94,7 +107,9 @@ forwards straight to the original while it is active, so RTSky's own calls are n
 * **DescriptorTracker**: sharded map from CPU descriptor handle to resource, formats, size, flags and
   DSV read-only flags (RTV, DSV and acceleration-structure SRVs only). RTV/DSV copies follow `CopyDescriptors*`.
 * **CommandListTracker**: one `ListState` per list. Recording a list is single-threaded, so it needs
-  no lock, and a thread-local cache makes lookups cheap. It holds:
+  no lock, and a thread-local cache makes lookups cheap. A private-data "destruction watch" drops
+  everything a destroyed list kept alive. RTSky never injects into a list whose Reset it did not
+  see, or after the list executed a bundle (inherited root state unknown). It holds:
   - root state: heaps, both root signatures, every root argument (tables, CBV/SRV/UAV, 32-bit
     constants) and the last PSO or state object. Root-signature changes and heap changes drop exactly
     what D3D12 invalidates. `RestoreState` replays all of it.
@@ -116,17 +131,28 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   - a clone stays private to its list until that list is **submitted**; the ExecuteCommandLists hook
     then publishes it with the queue and the `GpuLifetime` fence value of the submission;
   - Composite prefers a clone recorded earlier in its own list (ordered by the list). Otherwise it
-    binds the newest published clone, and if that came from another queue the ExecuteCommandLists
-    hook inserts `ID3D12CommandQueue::Wait(producerFence, value)` before submitting the consumer;
+    binds the newest published clone that was produced on the queue running the composite (ordered
+    by submission) or whose producing submission has already completed. RTSky never makes one queue
+    wait for another, which could deadlock with the game's own cross-queue waits. If the composite
+    list moves to a different queue after its clone was chosen, the ExecuteCommandLists hook inserts
+    one `Wait` on the producer's already-signalled fence and logs it;
+  - if a clone cannot be made (out of memory) the frame is not traced; the game's own TLAS memory is
+    never bound, because it may be rebuilt or reallocated while the trace runs;
   - a ring slot is rewritten only when no list that wrote or reads it can still be in flight (each
     slot has a busy token, carried by every reference); when all slots are busy a new buffer is made.
   Builds of opacity-micromap arrays or BLASes with OMM triangles are detected (see §5.4).
 * **FrameAnalyzer**: consumes binding logs at ExecuteCommandLists, so in GPU order. The G-buffer is the
-  MRT signature with the most draws. Frames are segmented at each G-buffer occurrence, and the HDR
-  lighting pass is the `CompositeCandidate`-th float-format binding of G-buffer size in that segment.
-  The rules (format/size signature plus per-list ordinal) are armed after `StableFrames` identical
-  segments and disarmed when the structure changes (menus, loading). The depth clear value of the
-  G-buffer depth (0 or 1) decides reversed or standard Z. Ctrl+F11 dumps one segment.
+  MRT signature with the most draws. Consecutive G-buffer bindings not separated by an HDR binding
+  (re-binds, lists split across threads, suspended render passes) form one *phase*; a frame is a
+  phase plus everything up to the next one. Prepare goes after the phase's last binding. The HDR
+  lighting pass is the `CompositeCandidate`-th float-format binding of G-buffer size after the phase.
+  A rule is a format/size signature plus the per-list ordinal, and it must match exactly one binding
+  per frame. If the ordinal alone is ambiguous, the number of G-buffer (or HDR) bindings recorded
+  earlier in the same list is added as a discriminator; if that is still ambiguous, nothing is
+  armed. Rules arm after `StableFrames` identical frames and disarm when the structure changes
+  (menus, loading: a phase that grows past 64 bindings without lighting). The depth clear value of
+  the G-buffer depth (0 or 1) decides reversed or standard Z. Ctrl+F11 dumps one frame.
+  `tests/AnalyzerTests.cpp` runs these scenarios against the real sources.
 
 ## 5. Renderer (`src/Render`)
 
