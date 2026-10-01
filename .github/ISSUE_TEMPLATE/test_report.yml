@@ -7,7 +7,8 @@ body:
     attributes:
       value: |
         Thanks for testing! Story mode only, never GTA Online.
-        Please attach **RTSky.log** and **RTSky_frame.log** (press Ctrl+F11 once during gameplay); both are next to the game executable.
+        Please attach **RTSky.log** and **RTSky_frame.log** (press Numpad . once during gameplay, NumLock on); both are next to the game executable.
+        A screenshot of RTSky's status lines (top-left corner) helps a lot.
   - type: input
     id: version
     attributes:
@@ -52,7 +53,7 @@ body:
     id: details
     attributes:
       label: Details
-      description: What you saw, where (location, time of day, weather), and the last status line from RTSky.log. Screenshots with RTSky on and off (F10) help a lot.
+      description: What you saw, where (location, time of day, weather), and the last status line from RTSky.log. Screenshots of the status lines and of the split compare (Numpad 3) help a lot.
     validations:
       required: true
   - type: textarea

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(RTSky VERSION 0.1.0 LANGUAGES C CXX)
+project(RTSky VERSION 0.1.1 LANGUAGES C CXX)
 
 # -------------------------------------------------------------------------------------------------
 # Options
@@ -128,6 +128,7 @@ add_library(RTSky SHARED
     src/Common/Config.cpp
     src/Common/Log.cpp
     src/Game/GameData.cpp
+    src/Game/Overlay.cpp
     src/Game/ScriptHookV.cpp
     src/Game/SunModel.cpp
     src/Game/Weather.cpp

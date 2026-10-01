@@ -75,12 +75,29 @@ That takes about a second of camera movement.
 
 ## Hotkeys
 
+NumLock must be on. Every key shows a short confirmation on screen, and all of them can be rebound
+in the `[Hotkeys]` section of `RTSky.ini`.
+
 | Key | Action |
 |---|---|
-| F10 | toggle RTSky |
-| F11 | cycle debug views |
-| Ctrl+F10 | reload `RTSky.ini` |
-| Ctrl+F11 | write the next frame's structure to `RTSky_frame.log` |
+| **Num 1** | RTSky on / off |
+| Num 2 | on-screen status lines on / off |
+| Num 3 | split-screen compare: left half original, right half RTSky |
+| Num 4 | force relighting even while the camera calibration has not passed |
+| Num 5 | next debug view |
+| Num 6 | sun / moon shadow rays on / off |
+| Num 7 | foliage mode: stochastic, opaque, ignored |
+| Num 8 | near-field split on / off |
+| Num 9 | trace path: DXR pipeline or inline RayQuery |
+| Num 0 | reload `RTSky.ini` |
+| Num . | write the next frame's structure to `RTSky_frame.log` |
+| Num + / Num - | strength +0.1 / -0.1 |
+| Num * | spatial denoiser on / off |
+| Num / | reset the temporal history and the camera calibration |
+
+The **status lines** in the top-left corner start with a verdict: what RTSky is doing, or the first
+thing stopping it (no hooks, passes not found, no TLAS, calibration not passed, ...). Below it are
+the details. If you see no status text at all, ScriptHookV did not load RTSky; check `RTSky.log`.
 
 Debug views: 1 sky visibility, 2 sun visibility, 3 normals, 4 depth, 5 sky irradiance,
 **6 TLAS alignment** (green means the game's BVH lines up with the screen, red means a mismatch, blue
@@ -132,9 +149,10 @@ The most useful contribution right now is a test run:
 
 1. Install as above, start story mode with ray tracing enabled, and play for a minute. Drive under a
    bridge, stand under trees, and turn the camera around.
-2. Press **Ctrl+F11** once during gameplay to write `RTSky_frame.log`.
+2. Press **Num .** once during gameplay to write `RTSky_frame.log`, and take a screenshot of the
+   status lines in the top-left corner.
 3. Open an issue with the **In-game test report** template, attach `RTSky.log` and
-   `RTSky_frame.log` (next to the game executable), and add screenshots with RTSky on and off (F10)
+   `RTSky_frame.log` (next to the game executable), and add screenshots with the split compare (Num 3)
    if you can.
 
 The log's status line (written every 10 s) shows what RTSky found: the device, the G-buffer and
