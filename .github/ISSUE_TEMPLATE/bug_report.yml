@@ -1,0 +1,20 @@
+name: Bug report
+description: A defect in the code, build or docs (for in-game results, use the test report).
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What is wrong
+      description: The behaviour, and the file / function if you know it
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen instead
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Build command and output, test case, or in-game steps with logs

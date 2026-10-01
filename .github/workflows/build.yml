@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: DirectX-Headers
+        run: git clone --depth 1 --branch v1.619.5 https://github.com/microsoft/DirectX-Headers.git dxh
+
+      - name: Configure
+        run: cmake -S tests -B build-tests -DRTSKY_DIRECTX_HEADERS_DIR=$PWD/dxh
+
+      - name: Build
+        run: cmake --build build-tests
+
+      - name: Math and frame-analyzer tests
+        run: ctest --test-dir build-tests --output-on-failure
+
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (MSVC x64, Windows SDK DXC)
+        run: cmake -S . -B build -A x64 -DRTSKY_BUILD_TESTS=ON "-DRTSKY_VERSION_STRING=dev-$($env:GITHUB_SHA.Substring(0,7))"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Math tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/RTSky.asi dist/
+          Copy-Item config/RTSky.ini dist/
+          Copy-Item README.md dist/
+          New-Item -ItemType Directory -Force dist/docs | Out-Null
+          Copy-Item docs/*.md dist/docs/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RTSky
+          path: dist/

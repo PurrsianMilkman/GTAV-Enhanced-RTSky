@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/PurrsianMilkman/GTAV-Enhanced-RTSky/blob/main/docs/CALIBRATION.md
+    about: What each status message means and which settings to try first.
