@@ -90,6 +90,14 @@ corrupt the game's state.
 * Update `docs/` and `config/RTSky.ini` when behaviour or options change.
 * Say whether and how you tested in game (GPU, driver, settings), or that you did not.
 
+## Releases
+
+Maintainers publish a release from the Actions tab: **release** workflow, **Run workflow** on `main`
+with a tag such as `v0.2.0` or `v0.2.0-beta`. Pushing such a tag does the same. The workflow builds
+with MSVC, runs the tests, and attaches `RTSky-<tag>.zip` and its SHA-256 to a GitHub release. Tags
+with a hyphen become pre-releases. Bump `project(RTSky VERSION ...)` in `CMakeLists.txt` with each
+release.
+
 ## Open areas
 
 * Real-game validation of the pass detection, the camera / TLAS calibration and the barrier handling
