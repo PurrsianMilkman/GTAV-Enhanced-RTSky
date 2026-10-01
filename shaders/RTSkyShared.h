@@ -175,6 +175,6 @@ struct SkyData
 //   FiltS/U  same layout as HistS/HistU (FiltU.a = filtered variance)
 //   ProbeResults[h] = number of probe rays of hypothesis h whose TLAS hit matches depth,
 //   ProbeResults[8 + h] = number of valid probe rays evaluated for hypothesis h,
-//   ProbeResults[16] = number of probe pixels with valid depth
+//   ProbeResults[16] = number of probe pixels with valid depth, [17] = frame index (staleness stamp)
 
 #endif // RTSKY_SHARED_H

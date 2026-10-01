@@ -3,6 +3,7 @@
 #include "CommandListTracker.h"
 
 #include "../Common/Log.h"
+#include "../Common/D3D12Compat.h"
 #include "../Render/GpuLifetime.h"
 
 namespace rtsky::track {

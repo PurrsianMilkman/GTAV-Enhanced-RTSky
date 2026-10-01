@@ -1,5 +1,6 @@
 // RTSky - barriers
 #include "Barriers.h"
+#include "../Common/D3D12Compat.h"
 
 #include <wrl/client.h>
 

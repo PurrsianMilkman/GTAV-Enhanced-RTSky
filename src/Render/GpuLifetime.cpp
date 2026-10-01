@@ -2,6 +2,7 @@
 #include "GpuLifetime.h"
 
 #include "../Common/Log.h"
+#include "../Common/D3D12Compat.h"
 #include "../Hooks/Bypass.h"
 #include "../Track/CommandListTracker.h"
 

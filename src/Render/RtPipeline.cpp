@@ -2,6 +2,7 @@
 #include "RtPipeline.h"
 
 #include "../Common/Log.h"
+#include "../Common/D3D12Compat.h"
 
 #include <d3dx12.h>
 

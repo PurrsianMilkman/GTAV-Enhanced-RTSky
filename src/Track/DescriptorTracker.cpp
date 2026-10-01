@@ -1,6 +1,8 @@
 // RTSky - CPU descriptor handle -> view information
 #include "DescriptorTracker.h"
 
+#include "../Common/D3D12Compat.h"
+
 #include <windows.h>
 
 #include <unordered_map>
@@ -40,7 +42,7 @@ static void FillResourceInfo(ID3D12Resource* resource, ViewInfo& info)
     info.resource = resource;
     if (resource == nullptr)
         return;
-    const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    const D3D12_RESOURCE_DESC desc = ResourceDesc(resource);
     info.resourceFormat = desc.Format;
     info.width = desc.Width;
     info.height = desc.Height;
