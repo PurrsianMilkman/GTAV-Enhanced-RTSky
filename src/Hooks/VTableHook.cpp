@@ -101,6 +101,44 @@ void* VTableHook::OriginalSlow(void** vtable, uint32_t slot) const
     return nullptr;
 }
 
+// True if `code` lies in the D3D12 runtime or a GPU driver's user-mode D3D12 driver. Only such
+// pointers may be adopted as "original" when a slot changed under us: a third-party hook (overlay,
+// capture tool) that was installed on top of RTSky saved RTSky's hook as *its* original, so adopting
+// it would make the two call each other forever.
+static bool IsRuntimeOrDriverCode(void* code)
+{
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(code), &module) ||
+        module == nullptr)
+    {
+        return false;
+    }
+    wchar_t path[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameW(module, path, MAX_PATH);
+    if (n == 0)
+        return false;
+    const wchar_t* name = path;
+    for (const wchar_t* p = path; *p != 0; ++p)
+    {
+        if (*p == L'\\' || *p == L'/')
+            name = p + 1;
+    }
+    static const wchar_t* const kPrefixes[] = {
+        L"d3d12",     // d3d12.dll, D3D12Core.dll, d3d12SDKLayers.dll
+        L"nvwgf2um",  // NVIDIA user-mode driver
+        L"amdxc",     // AMD user-mode driver
+        L"igd12um",   // Intel user-mode driver
+        L"igdumd",
+    };
+    for (const wchar_t* prefix : kPrefixes)
+    {
+        if (_wcsnicmp(name, prefix, wcslen(prefix)) == 0)
+            return true;
+    }
+    return false;
+}
+
 void VTableHook::Verify()
 {
     AcquireSRWLockExclusive(&m_lock);
@@ -113,10 +151,20 @@ void VTableHook::Verify()
             void* current = table.vtable[slot];
             if (current == hook)
                 continue;
-            LOG_WARN("%s: slot %u of vtable %p was overwritten (%p), re-hooking", m_name, slot,
-                     static_cast<void*>(table.vtable), current);
-            table.originals[slot] = current;
-            WriteSlot(table.vtable, slot, hook);
+            if (current == table.originals[slot] || IsRuntimeOrDriverCode(current))
+            {
+                // The runtime restored or replaced the entry (e.g. D3D12 runtime-bypass vtables).
+                LOG_WARN("%s: slot %u of vtable %p was reset by the runtime (%p), re-hooking", m_name, slot,
+                         static_cast<void*>(table.vtable), current);
+                table.originals[slot] = current;
+                WriteSlot(table.vtable, slot, hook);
+            }
+            else if (!table.chained[slot])
+            {
+                // Someone hooked on top of us; their hook calls ours. Leave it alone.
+                table.chained[slot] = true;
+                LOG_INFO("%s: slot %u is now hooked by another module (%p); keeping the chain", m_name, slot, current);
+            }
         }
     }
     ReleaseSRWLockExclusive(&m_lock);
