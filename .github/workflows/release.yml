@@ -1,0 +1,55 @@
+name: release
+
+# Pushing a tag such as v0.1.0 or v0.1.0-alpha builds RTSky with MSVC and publishes a GitHub release
+# with RTSky-<tag>.zip attached. Tags with a hyphen (alpha, beta, rc) become pre-releases.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (MSVC x64, Windows SDK DXC)
+        run: cmake -S . -B build -A x64 -DRTSKY_BUILD_TESTS=ON "-DRTSKY_VERSION_STRING=${{ github.ref_name }}"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Math tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "RTSky-${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force "$name/docs" | Out-Null
+          Copy-Item build/Release/RTSky.asi "$name/"
+          Copy-Item config/RTSky.ini "$name/"
+          Copy-Item README.md, LICENSE "$name/"
+          Copy-Item docs/*.md "$name/docs/"
+          Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
+          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $flags = @()
+          if ($tag.Contains("-")) { $flags += "--prerelease" }
+          $notes = @"
+          RTSky $tag - ray-traced sky lighting for GTA V Enhanced (story mode only).
+
+          **Install:** copy ``RTSky.asi`` and ``RTSky.ini`` into the game folder next to ScriptHookV and its ASI loader. Ray tracing must be enabled in the game. See README.md in the zip.
+
+          **Testing:** after a minute of gameplay, press Ctrl+F11 and open an *In-game test report* issue with ``RTSky.log`` and ``RTSky_frame.log`` attached.
+          "@
+          gh release create $tag "RTSky-$tag.zip" "RTSky-$tag.zip.sha256" --title "RTSky $tag" --notes $notes @flags

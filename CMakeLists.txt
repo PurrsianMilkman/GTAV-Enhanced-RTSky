@@ -6,6 +6,7 @@ project(RTSky VERSION 0.1.0 LANGUAGES C CXX)
 # -------------------------------------------------------------------------------------------------
 set(RTSKY_DXC "" CACHE FILEPATH "Path to dxc(.exe). Defaults to the Windows SDK / PATH.")
 set(RTSKY_DIRECTX_HEADERS_DIR "" CACHE PATH "Root of a DirectX-Headers checkout (leave empty to fetch v1.619.5).")
+set(RTSKY_VERSION_STRING "${PROJECT_VERSION}-dev" CACHE STRING "Version written to RTSky.log (release tag or commit).")
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "RTSky is a 64-bit mod: configure an x64 build.")
@@ -151,7 +152,7 @@ set_target_properties(RTSky PROPERTIES OUTPUT_NAME "RTSky" PREFIX "" SUFFIX ".as
 target_include_directories(RTSky BEFORE PRIVATE "${DXH_ROOT}/include/directx" "${DXH_ROOT}/include")
 target_include_directories(RTSky PRIVATE src shaders "${GEN_DIR}")
 target_link_libraries(RTSky PRIVATE minhook)
-target_compile_definitions(RTSky PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_compile_definitions(RTSky PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE RTSKY_VERSION="${RTSKY_VERSION_STRING}")
 
 if(MSVC)
     target_compile_options(RTSky PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /wd4100 /wd4324)
