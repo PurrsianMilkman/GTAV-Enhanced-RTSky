@@ -101,14 +101,26 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   - binding log: render targets and depth (resolved through the descriptor tracker), viewport, draw
     count, read-only depth, depth clear value, the barrier sequence at the last draw, and per-list
     ordinals of MRT bindings (3 or more RTVs plus depth) and float-HDR bindings.
-  - observed barriers per resource (legacy state or enhanced layout), plus a global record of which
-    barrier API the game uses per resource.
+  - observed barriers per resource: the state of subresource 0 (legacy state, or enhanced layout with
+    its `SyncAfter`/`AccessAfter`) as left by the last barrier covering it, whether a split barrier
+    (`BEGIN_ONLY` / `SYNC_SPLIT`) is still open, plus a global record of which barrier API the game
+    uses per resource;
+  - render passes that suspend or end with `PRESERVE_LOCAL_*`: nothing may be recorded after them, so
+    they are never injection points.
 * **TlasTracker**: every top-level build is inspected. The scene TLAS is the largest one by instance
   count, or the `TlasSelect`-th. It is cloned on the same command list right after its build
   (`UAV barrier; CopyRaytracingAccelerationStructure(CLONE); UAV barrier`) into a ring of 4 RTSky
   buffers sized by `GetRaytracingAccelerationStructurePrebuildInfo`. RTSky binds the clone, so it never
-  depends on how the game buffers or rebuilds its own TLAS. Builds of opacity-micromap arrays or
-  BLASes with OMM triangles are detected (see §5.4).
+  depends on how the game buffers or rebuilds its own TLAS. Recording order says nothing about GPU
+  order, so:
+  - a clone stays private to its list until that list is **submitted**; the ExecuteCommandLists hook
+    then publishes it with the queue and the `GpuLifetime` fence value of the submission;
+  - Composite prefers a clone recorded earlier in its own list (ordered by the list). Otherwise it
+    binds the newest published clone, and if that came from another queue the ExecuteCommandLists
+    hook inserts `ID3D12CommandQueue::Wait(producerFence, value)` before submitting the consumer;
+  - a ring slot is rewritten only when no list that wrote or reads it can still be in flight (each
+    slot has a busy token, carried by every reference); when all slots are busy a new buffer is made.
+  Builds of opacity-micromap arrays or BLASes with OMM triangles are detected (see §5.4).
 * **FrameAnalyzer**: consumes binding logs at ExecuteCommandLists, so in GPU order. The G-buffer is the
   MRT signature with the most draws. Frames are segmented at each G-buffer occurrence, and the HDR
   lighting pass is the `CompositeCandidate`-th float-format binding of G-buffer size in that segment.
@@ -140,12 +152,16 @@ The depth was just written through a writable DSV, so it is in `DEPTH_WRITE` (or
 `DEPTH_STENCIL_WRITE`) unless a barrier recorded after the last draw says otherwise. RTSky moves only
 the depth plane (subresource 0 / plane 0) to a shader-read state using the game's barrier API for that
 resource, runs `PrepareCS` (linear view depth plus normals reconstructed from depth), and moves it back.
+With enhanced barriers the transition waits with `SYNC_ALL` on the access scope the game's last barrier
+opened (or every access the layout allows), and the restore re-opens exactly that scope. Injection is
+skipped while a split barrier on the resource is open.
 The camera for the frame is chosen here (latency from calibration), together with the 4 latency
 hypotheses for the probe.
 
 ### 5.4 Composite (end of the HDR lighting pass)
-1. Sky: transmittance and multiple-scattering LUTs (when parameters change), sky-view LUT, SH
-   projection (`SkyProjectCS`).
+1. Sky: transmittance and multiple-scattering LUTs, sky-view LUT, SH projection (`SkyProjectCS`), all
+   every frame (the two static LUTs cost about 17K threads; a record-time "already built" flag would
+   be wrong for a list that is never submitted).
 2. Trace: `DispatchRays` on the DXR pipeline (or `RTSkyInlineCS` with `Path=inline`) against the TLAS
    clone. When the game uses opacity micromaps, only the pipeline path on tier 1.2 (with
    `ALLOW_OPACITY_MICROMAPS`) may trace.
@@ -153,7 +169,8 @@ hypotheses for the probe.
 4. `ProbeCS` while calibrating; its results are copied into the slot's readback region.
 5. Relighting: in place through a typed UAV when the HDR target allows UAV access, otherwise through a
    scene copy (copy out, compute, copy back). The target's state is `RENDER_TARGET` (it was just drawn
-   to) unless a barrier observed after the last draw says otherwise.
+   to) unless a barrier observed after the last draw says otherwise. Targets with several mips or
+   array slices are skipped: only the bound subresource's state is known.
 Until the probe confirms the camera and TLAS space (`MinCalibrationScore`), everything except the
 relighting runs (debug views still draw).
 
