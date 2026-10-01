@@ -16,6 +16,7 @@
 #include "../Game/SunModel.h"
 #include "../Game/Weather.h"
 #include "../Hooks/Bypass.h"
+#include "../Hooks/D3D12Hooks.h"
 #include "../Track/FrameAnalyzer.h"
 #include "../Track/TlasTracker.h"
 
@@ -206,6 +207,8 @@ public:
     void Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     void Composite(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     std::string Status();
+    std::vector<std::string> OverlayLines(const Config& cfg);
+    void ResetCalibration() { m_calibration.Reset(); }
     void OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
     void RequestReset() { m_resetRequested.store(true); }
     void ReleaseRegion(uint32_t region);
@@ -334,6 +337,8 @@ private:
 
     // statistics
     std::atomic<uint64_t> m_prepares{ 0 };
+    std::atomic<ULONGLONG> m_lastRelitTick{ 0 }; // last Composite that relit the image
+    std::atomic<ULONGLONG> m_lastHeldTick{ 0 };  // last Composite held back by the calibration gate
     std::atomic<uint64_t> m_lastExecutedPrepare{ 0 };
     std::atomic<uint64_t> m_pairingLag{ 0 };
     std::atomic<uint64_t> m_lateTlas{ 0 }; // composites upgraded to a newer TLAS at submission
@@ -996,7 +1001,7 @@ void RendererImpl::FillConstants(gpu::FrameConstants& fc, const PendingFrame& f,
 
     // Trace
     fc.traceParams = F4(cfg.maxRayDistance, cfg.normalBias, cfg.distanceBias, cfg.tMin);
-    fc.foliageParams = F4(cfg.foliageOpacity, cfg.foliageCells, std::max(cfg.nearFieldRadius, 0.0f), 0.0f);
+    fc.foliageParams = F4(cfg.foliageOpacity, cfg.foliageCells, cfg.nearField ? std::max(cfg.nearFieldRadius, 0.0f) : 0.0f, 0.0f);
     uint32_t flags = 0;
     if (cfg.sunShadowRays)
         flags |= RTSKY_FLAG_SUN_RAYS;
@@ -1023,7 +1028,7 @@ void RendererImpl::FillConstants(gpu::FrameConstants& fc, const PendingFrame& f,
     fc.compositeParams = F4(Saturate(cfg.strength), cfg.minRatio, cfg.maxRatio, std::max(cfg.gameSkyOcclusion, 0.0f));
     fc.compositeParams2 = F4(cfg.directScale, std::max(cfg.artificialAmbient, 0.0f), Saturate(cfg.groundAlbedo), 0.0f);
     fc.compositeParams3 = F4(fade, std::max(cfg.nearFadeDistance, 0.0f), static_cast<float>(cfg.debugView), srgbTarget ? 1.0f : 0.0f);
-    fc.compositeParams4 = F4(cfg.fadeStart, cfg.fadeEnd, 0.0f, 0.0f);
+    fc.compositeParams4 = F4(cfg.fadeStart, cfg.fadeEnd, cfg.compareSplit ? 1.0f : 0.0f, 0.0f);
 
     // Calibration hypotheses: latency l (0..3) x TLAS space s (0 world, 1 camera-relative)
     for (int l = 0; l < Calibration::kLatencies; ++l)
@@ -1477,7 +1482,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     own.Use(set.histMeta[p].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // Spatial filter
-    const int iterations = cfg.debugView == RTSKY_VIEW_TLAS ? 0 : cfg.denoiseIterations;
+    const int iterations = (cfg.debugView == RTSKY_VIEW_TLAS || !cfg.denoiser) ? 0 : cfg.denoiseIterations;
     uint32_t compositeTable = ST_CompHist;
     for (int i = 0; i < iterations; ++i)
     {
@@ -1525,7 +1530,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     // Until the probe has confirmed the camera / TLAS-space hypothesis, the occlusion could be
     // garbage: keep tracing (the probe needs it) but leave the game's image untouched.
     // Gate on the hypothesis actually rendered with (a pinned value may differ from the probe's pick).
-    const bool calibrated = !calibrating || (m_calibration.HasData(f.latencyUsed, tlasSpace) &&
+    const bool calibrated = !calibrating || cfg.forceRelight || (m_calibration.HasData(f.latencyUsed, tlasSpace) &&
                                              m_calibration.Confidence(f.latencyUsed, tlasSpace) >= cfg.minCalibrationScore);
     if (!calibrated && cfg.debugView == RTSKY_VIEW_NONE)
     {
@@ -1549,6 +1554,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         m_lastCompositeTraceW = f.traceW;
         m_lastCompositeTraceH = f.traceH;
         RTSKY_LOG_ONCE(log::Level::Info, "Calibrating camera / TLAS space before relighting (see the status line in RTSky.log)");
+        m_lastHeldTick.store(GetTickCount64(), std::memory_order_relaxed);
         m_lastSkip = "calibrating";
         ReleaseSRWLockExclusive(&m_lock);
         return;
@@ -1611,6 +1617,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     m_lastCompositeTraceW = f.traceW;
     m_lastCompositeTraceH = f.traceH;
     ++m_composites;
+    m_lastRelitTick.store(GetTickCount64(), std::memory_order_relaxed);
     if (m_composites.load() == 1)
         LOG_INFO("First Composite injection recorded (%s, %s, target format %d, %ux%u)", usePipeline ? "DXR pipeline" : "inline RayQuery",
                  inPlace ? "in place" : "via copy", static_cast<int>(uavFormat), tw, th);
@@ -1696,6 +1703,100 @@ std::string RendererImpl::Status()
     return buf;
 }
 
+const char* ViewName(int view)
+{
+    switch (view)
+    {
+    case RTSKY_VIEW_NONE: return "off";
+    case RTSKY_VIEW_SKY_RATIO: return "1 sky visibility";
+    case RTSKY_VIEW_SUN_VIS: return "2 sun visibility";
+    case RTSKY_VIEW_NORMALS: return "3 normals";
+    case RTSKY_VIEW_DEPTH: return "4 depth";
+    case RTSKY_VIEW_SKY_S: return "5 sky irradiance";
+    case RTSKY_VIEW_TLAS: return "6 TLAS alignment";
+    case RTSKY_VIEW_RATIO: return "7 lighting multiplier";
+    case RTSKY_VIEW_HISTORY: return "8 temporal history";
+    default: return "?";
+    }
+}
+
+std::vector<std::string> RendererImpl::OverlayLines(const Config& cfg)
+{
+    std::vector<std::string> lines;
+    char buf[256];
+    const ULONGLONG now = GetTickCount64();
+    const InitState init = m_init.load();
+    const track::InjectionRules rules = track::Analyzer().Rules();
+    const std::string analyzer = track::Analyzer().Status();
+    AcquireSRWLockShared(&m_lock);
+    const std::string skip = m_lastSkip;
+    ReleaseSRWLockShared(&m_lock);
+    const bool relitRecently = now - m_lastRelitTick.load() < 1500;
+    const bool heldRecently = now - m_lastHeldTick.load() < 1500;
+    const bool calibrating = cfg.calibrationProbe && (cfg.cameraLatency < 0 || cfg.tlasSpace == TlasSpaceSetting::Auto);
+    const float confidence = m_calibration.Confidence();
+
+    // 1. Verdict: the first thing that stops RTSky, in pipeline order.
+    std::string verdict;
+    if (!cfg.enabled)
+        verdict = "RTSky OFF";
+    else if (!hooks::Installed())
+        verdict = "RTSky: D3D12 hooks not installed (see RTSky.log)";
+    else if (!rules.armed)
+        verdict = "RTSky: looking for the G-buffer / lighting passes";
+    else if (init == InitState::Failed)
+        verdict = "RTSky: renderer failed to start (see RTSky.log)";
+    else if (init != InitState::Ready)
+        verdict = "RTSky: starting the renderer";
+    else if (relitRecently)
+        verdict = cfg.debugView != RTSKY_VIEW_NONE ? "RTSky ACTIVE - showing a debug view" : "RTSky ACTIVE - relighting";
+    else if (heldRecently)
+        verdict = "RTSky: tracing, relighting HELD until calibration passes";
+    else
+        verdict = "RTSky: not relighting - " + (skip.empty() ? std::string("no composite recorded yet") : skip);
+    lines.push_back(verdict);
+
+    // 2. Details
+    const char* initName = init == InitState::Ready ? "ready" : init == InitState::Running ? "starting" : init == InitState::Failed ? "FAILED" : "idle";
+    snprintf(buf, sizeof(buf), "%s | hooks %s | renderer %s | %s", RTSKY_VERSION, hooks::Installed() ? "OK" : "waiting", initName,
+             m_rtPipeline.IsValid() && cfg.tracePath == TracePath::Pipeline ? "DXR pipeline" : "inline RayQuery");
+    lines.push_back(buf);
+    lines.push_back("Frame: " + analyzer);
+    snprintf(buf, sizeof(buf), "TLAS: %llu builds seen%s | prepares %llu | composites %llu | late %llu",
+             static_cast<unsigned long long>(track::Tlas().TopLevelBuilds()), track::Tlas().OpacityMicromapsSeen() ? " (OMM)" : "",
+             static_cast<unsigned long long>(m_prepares.load()), static_cast<unsigned long long>(m_composites.load()),
+             static_cast<unsigned long long>(m_pairingLag.load()));
+    lines.push_back(buf);
+    const int pixels = m_calibration.LastProbePixels();
+    if (calibrating)
+    {
+        snprintf(buf, sizeof(buf), "Calibration: score %.2f (needs %.2f)%s%s | depth samples %d/64", confidence, cfg.minCalibrationScore,
+                 cfg.forceRelight ? " FORCED" : "", confidence >= cfg.minCalibrationScore ? " OK" : "", pixels < 0 ? 0 : pixels);
+        lines.push_back(buf);
+        lines.push_back(m_calibration.Describe());
+    }
+    else
+    {
+        lines.push_back("Calibration: off (pinned Latency / TlasSpace)");
+    }
+    if (!skip.empty())
+        lines.push_back("Last skip: " + skip);
+    // Game states that fade the relighting out (InteriorStrength / CutsceneStrength / loading).
+    const game::EnvironmentSample env = game::Game().GetEnvironment();
+    if (env.valid && (env.loading || (env.interior && cfg.interiorStrength < 1.0f) || (env.cutscene && cfg.cutsceneStrength < 1.0f)))
+    {
+        snprintf(buf, sizeof(buf), "Faded out: %s%s%s", env.loading ? "loading screen " : "",
+                 env.interior ? "interior (InteriorStrength) " : "", env.cutscene ? "cutscene (CutsceneStrength)" : "");
+        lines.push_back(buf);
+    }
+    const char* foliage = cfg.foliageMode == FoliageMode::Opaque ? "opaque" : cfg.foliageMode == FoliageMode::Ignore ? "ignored" : "stochastic";
+    snprintf(buf, sizeof(buf), "View %s | compare %s | strength %.2f | sun %s | foliage %s | near %s | denoise %s",
+             ViewName(cfg.debugView), cfg.compareSplit ? "ON" : "off", cfg.strength, cfg.sunShadowRays ? "on" : "off", foliage,
+             cfg.nearField ? "on" : "off", cfg.denoiser ? "on" : "off");
+    lines.push_back(buf);
+    return lines;
+}
+
 void RendererImpl::ScriptTick()
 {
     const ULONGLONG now = GetTickCount64();
@@ -1760,6 +1861,21 @@ void OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* l
 void OnScriptTick()
 {
     Instance().ScriptTick();
+}
+
+std::vector<std::string> OverlayLines(const Config& cfg)
+{
+    return Instance().OverlayLines(cfg);
+}
+
+void ResetCalibration()
+{
+    Instance().ResetCalibration();
+}
+
+const char* DebugViewName(int view)
+{
+    return ViewName(view);
 }
 
 std::string RendererStatus()

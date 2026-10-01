@@ -125,5 +125,16 @@ void CompositeCS(uint3 id : SV_DispatchThreadID)
     }
     }
 
+    // Split-screen compare (hotkey): left half untouched, right half as above, with a bright divider.
+    if (g_Frame.compositeParams4.z > 0.5f)
+    {
+        float split = floor(vpSize.x * 0.5f);
+        float x = float(local.x);
+        if (x < split - 1.0f)
+            result = color.rgb;
+        else if (x <= split + 1.0f)
+            result = color.rgb * 4.0f + 0.05f;
+    }
+
     g_Color[target] = float4(result, color.a);
 }
