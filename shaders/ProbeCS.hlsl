@@ -2,7 +2,7 @@
 // Traces primary rays for an 8x8 grid of pixels under 8 camera hypotheses and counts how many
 // land at the distance the depth buffer reports. The host picks the hypothesis (camera latency,
 // TLAS in world or camera-relative space) that matches best.
-//   SRV t0 LinearDepth[cur]        UAV u0 RWStructuredBuffer<uint> ProbeResults[17]
+//   SRV t0 LinearDepth[cur]        UAV u0 RWStructuredBuffer<uint> ProbeResults[18]
 //   TLAS t0 space1                 Dispatch (1, 1, 1)
 #include "Common.hlsli"
 
@@ -81,5 +81,8 @@ void ProbeCS(uint3 gtid : SV_GroupThreadID, uint gi : SV_GroupIndex)
         g_Results[RTSKY_PROBE_HYPOTHESES + gi] = gs_Valid[gi];
     }
     if (gi == 0)
+    {
         g_Results[2 * RTSKY_PROBE_HYPOTHESES] = gs_Pixels;
+        g_Results[2 * RTSKY_PROBE_HYPOTHESES + 1] = g_Frame.traceFlags.z; // stamp: frame index
+    }
 }

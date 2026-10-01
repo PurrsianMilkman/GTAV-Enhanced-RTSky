@@ -1,6 +1,7 @@
 // RTSky - per command list recorded state
 #include "CommandListTracker.h"
 #include "DescriptorTracker.h"
+#include "../Common/D3D12Compat.h"
 
 #include <windows.h>
 

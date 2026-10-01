@@ -200,11 +200,11 @@ bool Config::Load(const std::wstring& path)
     r.Get("sky.moonintensity", moonIntensity);
     r.Get("sky.miescale", mieScale);
     r.Get("sky.groundalbedo", atmosphereGroundAlbedo);
-    r.Get("sky.sunrisehour", sunriseHour);
-    r.Get("sky.sunsethour", sunsetHour);
-    r.Get("sky.sunmaxelevation", sunMaxElevationDeg);
+    r.Get("sky.sunroll", sunRollDeg);
+    r.Get("sky.daystarthour", dayStartHour);
+    r.Get("sky.daylengthhours", dayLengthHours);
     r.Get("sky.sunazimuthoffset", sunAzimuthOffsetDeg);
-    r.Get("sky.moonphaseoffsethours", moonPhaseOffsetHours);
+    r.Get("sky.moonroll", moonRollDeg);
 
     // Sanitise
     raysPerPixel = Clamp(raysPerPixel, 1, 16);
@@ -218,6 +218,7 @@ bool Config::Load(const std::wstring& path)
     stableFrames = Clamp(stableFrames, 1, 60);
     instanceMask &= 0xFFu;
     debugView = Clamp(debugView, 0, 8);
+    dayLengthHours = Clamp(dayLengthHours, 1.0f, 23.0f);
     return true;
 }
 

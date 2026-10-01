@@ -31,6 +31,19 @@ public:
     // True if the object's vtable is already patched.
     bool IsPatched(void* object) const;
 
+    // Lock-free variant for hot paths (tables are only ever appended).
+    bool IsKnownFast(void* object) const
+    {
+        void** vtable = *static_cast<void***>(object);
+        const uint32_t count = m_tableCount.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            if (m_tables[i].vtable == vtable)
+                return true;
+        }
+        return false;
+    }
+
     // Original function for `object`'s vtable and slot, or nullptr if the vtable is unknown.
     void* Original(void* object, uint32_t slot) const
     {

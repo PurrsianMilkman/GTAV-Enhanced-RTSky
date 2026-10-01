@@ -82,11 +82,11 @@ struct Config
     float moonIntensity = 2.5e-6f;
     float mieScale = 1.0f;
     float atmosphereGroundAlbedo = 0.3f;
-    float sunriseHour = 6.0f;
-    float sunsetHour = 20.0f;
-    float sunMaxElevationDeg = 70.0f;
+    float sunRollDeg = 122.0f;      // time.xml <suninfo sun_roll>
+    float dayStartHour = 6.0f;      // sunrise
+    float dayLengthHours = 14.0f;   // sunrise -> sunset
     float sunAzimuthOffsetDeg = 0.0f;
-    float moonPhaseOffsetHours = 12.0f;
+    float moonRollDeg = 122.0f;
 
     bool Load(const std::wstring& path);
 };

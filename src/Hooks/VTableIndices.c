@@ -15,6 +15,8 @@ const unsigned RTSKY_IDX_Device_CreateShaderResourceView = RTSKY_SLOT(ID3D12Devi
 const unsigned RTSKY_IDX_Device_CreateRenderTargetView = RTSKY_SLOT(ID3D12Device5, CreateRenderTargetView);
 const unsigned RTSKY_IDX_Device_CreateDepthStencilView = RTSKY_SLOT(ID3D12Device5, CreateDepthStencilView);
 const unsigned RTSKY_IDX_Device_CreateCommandList1 = RTSKY_SLOT(ID3D12Device5, CreateCommandList1);
+const unsigned RTSKY_IDX_Device_CopyDescriptors = RTSKY_SLOT(ID3D12Device5, CopyDescriptors);
+const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple = RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple);
 
 const unsigned RTSKY_IDX_CL_Close = RTSKY_SLOT(ID3D12GraphicsCommandList7, Close);
 const unsigned RTSKY_IDX_CL_Reset = RTSKY_SLOT(ID3D12GraphicsCommandList7, Reset);
@@ -58,3 +60,5 @@ _Static_assert(RTSKY_SLOT(ID3D12GraphicsCommandList7, BuildRaytracingAcceleratio
 _Static_assert(RTSKY_SLOT(ID3D12GraphicsCommandList7, DispatchRays) == 76, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12GraphicsCommandList7, Barrier) == 80, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12CommandQueue, ExecuteCommandLists) == 10, "unexpected vtable layout");
+_Static_assert(RTSKY_SLOT(ID3D12Device5, CreateRenderTargetView) == 20, "unexpected vtable layout");
+_Static_assert(RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple) == 24, "unexpected vtable layout");

@@ -12,6 +12,8 @@ extern const unsigned RTSKY_IDX_Device_CreateShaderResourceView;
 extern const unsigned RTSKY_IDX_Device_CreateRenderTargetView;
 extern const unsigned RTSKY_IDX_Device_CreateDepthStencilView;
 extern const unsigned RTSKY_IDX_Device_CreateCommandList1;
+extern const unsigned RTSKY_IDX_Device_CopyDescriptors;
+extern const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple;
 
 // ID3D12GraphicsCommandList7
 extern const unsigned RTSKY_IDX_CL_Close;
