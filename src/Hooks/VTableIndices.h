@@ -14,6 +14,7 @@ extern const unsigned RTSKY_IDX_Device_CreateDepthStencilView;
 extern const unsigned RTSKY_IDX_Device_CreateCommandList1;
 extern const unsigned RTSKY_IDX_Device_CopyDescriptors;
 extern const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple;
+extern const unsigned RTSKY_IDX_Device_CreateCommandSignature;
 
 // ID3D12GraphicsCommandList7
 extern const unsigned RTSKY_IDX_CL_Close;
@@ -46,6 +47,7 @@ extern const unsigned RTSKY_IDX_CL_EndRenderPass;
 extern const unsigned RTSKY_IDX_CL_BuildRaytracingAccelerationStructure;
 extern const unsigned RTSKY_IDX_CL_SetPipelineState1;
 extern const unsigned RTSKY_IDX_CL_DispatchRays;
+extern const unsigned RTSKY_IDX_CL_ExecuteBundle;
 extern const unsigned RTSKY_IDX_CL_Barrier;
 extern const unsigned RTSKY_IDX_CL_Count; // number of slots in ID3D12GraphicsCommandList7
 

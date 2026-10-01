@@ -20,8 +20,10 @@ Status: renderer ready, 1520 prepares, 1518 composites, calibration: latency 1, 
 
 RTSky works out the frame from the order the game submits its work in:
 
-* **G-buffer**: the multi-render-target pass (3 or more targets plus depth) with the most draws. RTSky
-  reads the depth buffer at the end of this pass, where its state is certain.
+* **G-buffer**: the multi-render-target pass (3 or more targets plus depth) with the most draws. If the
+  game binds it several times (opaque, decals, foliage), splits it across command lists or suspends
+  its render pass, all those bindings form one *G-buffer phase*, and RTSky reads the depth buffer at
+  the end of the phase's **last** binding, where the depth is complete and its state is certain.
 * **HDR lighting**: the `CompositeCandidate`-th pass after the G-buffer that renders into a float
   target of the same size. RTSky relights this target when the pass ends, before fog, sky,
   transparents and post-processing.
@@ -35,9 +37,21 @@ Press **Ctrl+F11** to write one frame of submitted passes to `RTSky_frame.log`, 
   #5   1 RT [RGBA16F] + D32S8 2560x1440                                           draws 230   hdr#1 dsv ro-depth
 ```
 
+The rules RTSky matches at recording time are "this signature at this ordinal within its command
+list" (`mrt#n` / `hdr#n`). A rule is only armed when it matches **exactly one** pass per frame. If the
+same signature appears at the same ordinal in two lists, the dump's `(after N mrt)` / `(after N hdr)`
+counts, the number of G-buffer or HDR passes recorded earlier in the same list, are used to tell
+them apart. If that is still ambiguous, the status says `not unique per frame` and nothing is injected.
+Pin an ordinal that is unique in the dump.
+
 If the image looks wrong, for example the sky dome, fog or water is darkened (relit too late), or
 nothing changes (relit too early, before the ambient term is added), pick another candidate with
 `CompositeCandidate=n`. `CompositeOrdinal` / `GBufferOrdinal` pin the per-list ordinals directly.
+
+**Pairing.** The Composite uses the camera and depth of the Prepare recorded before it. A game that
+records its lighting list before the frame's G-buffer list (parallel recording) relights with the
+previous frame's depth, one frame late, which can show as thin halos while turning. The status line
+counts these (`paired late`), and the log warns once.
 
 `frame structure changed, re-analysing` is normal in menus, loading screens and cutscene transitions.
 
@@ -47,7 +61,11 @@ nothing changes (relit too early, before the ambient term is added), pick anothe
   any RT effect.
 * `the scene TLAS was not rebuilt`: RTSky never traces a BVH from an older frame, because the geometry
   it references may already be freed.
-* `the game uses opacity micromaps`: only the DXR pipeline path on a tier 1.2 GPU can trace them.
+* `the game uses opacity micromaps`: only the DXR pipeline path on a tier 1.2 GPU can trace them. The
+  calibration probe uses inline ray queries, which cannot, so it is disabled: set `Latency` and
+  `TlasSpace` explicitly (section 4) to enable relighting.
+* RTSky always traces its own copy of the BVH. If that copy cannot be allocated (video memory full),
+  the frame is skipped and the allocation is retried about every 2 seconds.
 * `TlasSelect=n` picks one of several BVHs if the game builds more than one per frame. The frame dump
   shows the build counts per command list.
 
@@ -74,6 +92,9 @@ If every score stays low:
    suggests a wrong `DepthMode` (try `reversed_infinite` or `standard`). Red that grows towards the
    screen edges suggests a wrong FOV (`FovScale`).
 3. Pin what you found (`Latency=1`, `TlasSpace=world`, ...) and set `CalibrationProbe=0`.
+
+With only one of the two pinned, the probe still picks the other one, within the pinned row, and the
+`MinCalibrationScore` gate applies to the combination actually used.
 
 ## 5. Look tuning
 

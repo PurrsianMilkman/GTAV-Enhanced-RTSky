@@ -177,6 +177,27 @@ void STDMETHODCALLTYPE Device_CreateDepthStencilView(ID3D12Device* self, ID3D12R
     Orig<Fn>(g_device, RTSKY_IDX_Device_CreateDepthStencilView, self, resource, desc, handle);
 }
 
+HRESULT STDMETHODCALLTYPE Device_CreateCommandSignature(ID3D12Device* self, const D3D12_COMMAND_SIGNATURE_DESC* desc,
+                                                        ID3D12RootSignature* rootSignature, REFIID riid, void** signature)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_COMMAND_SIGNATURE_DESC*, ID3D12RootSignature*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateCommandSignature, self, desc, rootSignature, riid, signature);
+    if (SUCCEEDED(hr) && desc != nullptr && signature != nullptr && *signature != nullptr && !HookBypass::Active())
+    {
+        bool draws = false;
+        for (UINT i = 0; i < desc->NumArgumentDescs && desc->pArgumentDescs != nullptr; ++i)
+        {
+            const D3D12_INDIRECT_ARGUMENT_TYPE t = desc->pArgumentDescs[i].Type;
+            draws |= t == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW || t == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ||
+                     t == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+        }
+        ComPtr<ID3D12CommandSignature> sig;
+        if (SUCCEEDED(static_cast<IUnknown*>(*signature)->QueryInterface(IID_PPV_ARGS(&sig))))
+            track::NoteCommandSignature(sig.Get(), draws);
+    }
+    return hr;
+}
+
 // Copies of RTV / DSV descriptors between heaps carry the tracked view information along.
 void CopyTracked(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src, UINT count, UINT increment)
 {
@@ -280,7 +301,9 @@ void STDMETHODCALLTYPE CL_DrawIndexedInstanced(CL* self, UINT a, UINT b, UINT c,
 void STDMETHODCALLTYPE CL_ExecuteIndirect(CL* self, ID3D12CommandSignature* sig, UINT maxCount, ID3D12Resource* args, UINT64 argsOffset,
                                           ID3D12Resource* countBuffer, UINT64 countOffset)
 {
-    if (ListState* s = Track(self))
+    // Only indirect DRAWS count as draws: an indirect dispatch recorded while a render-target binding
+    // is open must not move the binding's "last draw" past the game's following barriers.
+    if (ListState* s = Track(self); s != nullptr && track::CommandSignatureDraws(sig))
         track::OnDraw(*s);
     using Fn = void(STDMETHODCALLTYPE*)(CL*, ID3D12CommandSignature*, UINT, ID3D12Resource*, UINT64, ID3D12Resource*, UINT64);
     Orig<Fn>(g_list, RTSKY_IDX_CL_ExecuteIndirect, self, sig, maxCount, args, argsOffset, countBuffer, countOffset);
@@ -514,6 +537,17 @@ void STDMETHODCALLTYPE CL_BuildRaytracingAccelerationStructure(CL* self, const D
     }
 }
 
+// Root arguments and the pipeline set inside a bundle are inherited by the calling list, and RTSky
+// cannot see them: RestoreState would replay stale values. Lists that execute bundles are never
+// injected into after that point.
+void STDMETHODCALLTYPE CL_ExecuteBundle(CL* self, ID3D12GraphicsCommandList* bundle)
+{
+    if (ListState* s = Track(self))
+        s->stateUnknown = true;
+    using Fn = void(STDMETHODCALLTYPE*)(CL*, ID3D12GraphicsCommandList*);
+    Orig<Fn>(g_list, RTSKY_IDX_CL_ExecuteBundle, self, bundle);
+}
+
 void STDMETHODCALLTYPE CL_DispatchRays(CL* self, const D3D12_DISPATCH_RAYS_DESC* desc)
 {
     if (ListState* s = Track(self))
@@ -535,6 +569,7 @@ void STDMETHODCALLTYPE Queue_ExecuteCommandLists(ID3D12CommandQueue* self, UINT 
         for (UINT i = 0; i < count; ++i)
             PatchList(lists[i]);
         track::Analyzer().OnExecute(self, count, lists);
+        render::OnListsExecuted(count, lists);
 
         for (UINT i = 0; i < count; ++i)
         {
@@ -588,6 +623,7 @@ void RegisterHooks()
     g_device.AddHook(RTSKY_IDX_Device_CreateDepthStencilView, reinterpret_cast<void*>(&Device_CreateDepthStencilView));
     g_device.AddHook(RTSKY_IDX_Device_CopyDescriptors, reinterpret_cast<void*>(&Device_CopyDescriptors));
     g_device.AddHook(RTSKY_IDX_Device_CopyDescriptorsSimple, reinterpret_cast<void*>(&Device_CopyDescriptorsSimple));
+    g_device.AddHook(RTSKY_IDX_Device_CreateCommandSignature, reinterpret_cast<void*>(&Device_CreateCommandSignature));
 
 #define RTSKY_HOOK(Name) g_list.AddHook(RTSKY_IDX_CL_##Name, reinterpret_cast<void*>(&CL_##Name))
     RTSKY_HOOK(Close);
@@ -621,6 +657,7 @@ void RegisterHooks()
     RTSKY_HOOK(EndRenderPass);
     RTSKY_HOOK(BuildRaytracingAccelerationStructure);
     RTSKY_HOOK(DispatchRays);
+    RTSKY_HOOK(ExecuteBundle);
 #undef RTSKY_HOOK
 
     g_queue.AddHook(RTSKY_IDX_Queue_ExecuteCommandLists, reinterpret_cast<void*>(&Queue_ExecuteCommandLists));

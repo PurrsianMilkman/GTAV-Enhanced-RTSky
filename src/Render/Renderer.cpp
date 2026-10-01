@@ -189,6 +189,7 @@ struct PendingFrame
     float depthVpX = 0.0f, depthVpY = 0.0f;
     UINT64 depthTexW = 0;
     UINT depthTexH = 0;
+    ULONGLONG recordedAt = 0; // GetTickCount64 at Prepare: a Composite never pairs with an old one
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -201,6 +202,7 @@ public:
     void Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     void Composite(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     std::string Status();
+    void OnListsExecuted(UINT count, ID3D12CommandList* const* lists);
     void RequestReset() { m_resetRequested.store(true); }
     void ReleaseRegion(uint32_t region);
     void ScriptTick();
@@ -314,6 +316,7 @@ private:
     const ResourceSet* m_lastCompositeSet = nullptr;
     UINT m_lastCompositeTraceW = 0;
     UINT m_lastCompositeTraceH = 0;
+    int m_lastDebugView = -1;
     ULONGLONG m_setRetryAt = 0;      // screen-resource allocation backoff (GetTickCount64)
     ULONGLONG m_sceneCopyRetryAt = 0; // scene-copy allocation backoff
     uint64_t m_lastTlasSerial = 0;
@@ -326,6 +329,8 @@ private:
 
     // statistics
     std::atomic<uint64_t> m_prepares{ 0 };
+    std::atomic<uint64_t> m_lastExecutedPrepare{ 0 };
+    std::atomic<uint64_t> m_pairingLag{ 0 };
     std::atomic<uint64_t> m_composites{ 0 };
     std::string m_lastSkip;
     ULONGLONG m_lastStatusLog = 0;
@@ -1049,6 +1054,12 @@ static bool StateFromObserved(const track::ObservedState& o, GameResourceState* 
 // -------------------------------------------------------------------------------------------------
 void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg)
 {
+    // Whatever happens below, the previous frame's Prepare must not be paired with this frame's
+    // Composite (its depth and camera are a frame old).
+    AcquireSRWLockExclusive(&m_lock);
+    m_pending.valid = false;
+    ReleaseSRWLockExclusive(&m_lock);
+
     ID3D12Resource* depth = record.dsv.resource;
     if (!record.hasDsv || depth == nullptr)
         return;
@@ -1135,7 +1146,10 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     }
 
     // Camera for this frame + calibration hypotheses
-    const int latency = cfg.cameraLatency >= 0 ? cfg.cameraLatency : m_calibration.Latency();
+    // A pinned TLAS space restricts the latency choice to that row of the calibration scores.
+    const int latency = cfg.cameraLatency >= 0                         ? cfg.cameraLatency
+                        : cfg.tlasSpace != TlasSpaceSetting::Auto      ? m_calibration.BestLatencyFor(static_cast<int>(cfg.tlasSpace))
+                                                                       : m_calibration.Latency();
     const float aspect = float(w) / float(h);
     PendingFrame f;
     game::CameraSample sample;
@@ -1231,7 +1245,9 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
 
     Lifetime().Attach(state, slotHandle);
     Lifetime().Attach(state, std::static_pointer_cast<void>(m_set));
+    f.recordedAt = GetTickCount64();
     m_pending = f;
+    state.preparedSerial = f.prepareSerial;
     ++m_prepares;
     if (m_prepares.load() == 1)
         LOG_INFO("First Prepare injection recorded (%ux%u, depth format %d, %s barriers)", w, h,
@@ -1254,7 +1270,8 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         ReleaseSRWLockExclusive(&m_lock);
     };
 
-    if (!m_pending.valid || !m_pending.set || m_pending.prepareSerial == m_lastCompositePrepareSerial)
+    if (!m_pending.valid || !m_pending.set || m_pending.prepareSerial == m_lastCompositePrepareSerial ||
+        GetTickCount64() - m_pending.recordedAt > 250)
         return skip("no Prepare for this frame");
     if (track::Tlas().OpacityMicromapsSeen() && !(cfg.tracePath == TracePath::Pipeline && m_rtPipeline.AllowsOpacityMicromaps()))
         return skip("the game uses opacity micromaps; only the DXR pipeline path on tier 1.2 can trace them");
@@ -1285,7 +1302,9 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
 
     // Calibration gate: a wrong camera / TLAS space would produce garbage occlusion.
     const bool calibrating = cfg.calibrationProbe && (cfg.cameraLatency < 0 || cfg.tlasSpace == TlasSpaceSetting::Auto);
-    int tlasSpace = cfg.tlasSpace == TlasSpaceSetting::Auto ? m_calibration.TlasSpace() : static_cast<int>(cfg.tlasSpace);
+    int tlasSpace = cfg.tlasSpace != TlasSpaceSetting::Auto ? static_cast<int>(cfg.tlasSpace)
+                    : cfg.cameraLatency >= 0                ? m_calibration.BestSpaceFor(cfg.cameraLatency)
+                                                            : m_calibration.TlasSpace();
 
     // Composite target
     const D3D12_RESOURCE_DESC targetDesc = ResourceDesc(target);
@@ -1333,6 +1352,13 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
 
     // History validity
     bool reset = m_resetRequested.exchange(false);
+    // Debug views write other data through the same history (e.g. the TLAS view): switching views
+    // starts the accumulation over.
+    if (cfg.debugView != m_lastDebugView)
+    {
+        m_lastDebugView = cfg.debugView;
+        reset = true;
+    }
     if (m_lastCompositeSet != &set || f.prepareSerial != m_lastCompositePrepareSerial + 1 || !m_lastCompositeCamera.valid ||
         f.traceW != m_lastCompositeTraceW || f.traceH != m_lastCompositeTraceH)
         reset = true;
@@ -1474,7 +1500,9 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
 
     // Until the probe has confirmed the camera / TLAS-space hypothesis, the occlusion could be
     // garbage: keep tracing (the probe needs it) but leave the game's image untouched.
-    const bool calibrated = !calibrating || (m_calibration.HasData() && m_calibration.Confidence() >= cfg.minCalibrationScore);
+    // Gate on the hypothesis actually rendered with (a pinned value may differ from the probe's pick).
+    const bool calibrated = !calibrating || (m_calibration.HasData(f.latencyUsed, tlasSpace) &&
+                                             m_calibration.Confidence(f.latencyUsed, tlasSpace) >= cfg.minCalibrationScore);
     if (!calibrated && cfg.debugView == RTSKY_VIEW_NONE)
     {
         own.Rest(list);
@@ -1487,6 +1515,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
             state.tlasConsumed = tlas;
             state.tlasConsumedValid = true;
         }
+        state.compositeConsumedSerial = f.prepareSerial;
         m_lastTlasSerial = tlas.buildSerial;
         m_lastCompositePrepareSerial = f.prepareSerial;
         m_lastCompositeCamera = f.camera;
@@ -1543,6 +1572,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         state.tlasConsumed = tlas;
         state.tlasConsumedValid = true;
     }
+    state.compositeConsumedSerial = f.prepareSerial;
     if (sceneCopy)
         Lifetime().Attach(state, std::static_pointer_cast<void>(sceneCopy));
 
@@ -1560,6 +1590,27 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     ReleaseSRWLockExclusive(&m_lock);
 }
 
+void RendererImpl::OnListsExecuted(UINT count, ID3D12CommandList* const* lists)
+{
+    // Prepare and Composite are paired at recording time. With parallel recording the lighting list
+    // can be recorded before this frame's G-buffer list, and the Composite then pairs with the
+    // previous frame's Prepare (one frame of lag). Detect it in GPU order and report it.
+    for (UINT i = 0; i < count; ++i)
+    {
+        const ListState* s = track::FindListState(lists[i]);
+        if (s == nullptr)
+            continue;
+        if (s->preparedSerial != 0)
+            m_lastExecutedPrepare.store(s->preparedSerial, std::memory_order_relaxed);
+        if (s->compositeConsumedSerial != 0 && s->compositeConsumedSerial != m_lastExecutedPrepare.load(std::memory_order_relaxed))
+        {
+            if (m_pairingLag.fetch_add(1) == 0)
+                LOG_WARN("The HDR lighting list was recorded before this frame's G-buffer list: relighting lags one frame "
+                         "(see docs/CALIBRATION.md, 'Pairing')");
+        }
+    }
+}
+
 std::string RendererImpl::Status()
 {
     const char* init = "not started";
@@ -1574,9 +1625,10 @@ std::string RendererImpl::Status()
     std::string skip = m_lastSkip;
     ReleaseSRWLockShared(&m_lock);
     char buf[512];
-    snprintf(buf, sizeof(buf), "renderer %s, %llu prepares, %llu composites, calibration: %s%s%s", init,
+    snprintf(buf, sizeof(buf), "renderer %s, %llu prepares, %llu composites (%llu paired late), calibration: %s%s%s", init,
              static_cast<unsigned long long>(m_prepares.load()), static_cast<unsigned long long>(m_composites.load()),
-             m_calibration.Describe().c_str(), skip.empty() ? "" : ", last skip: ", skip.c_str());
+             static_cast<unsigned long long>(m_pairingLag.load()), m_calibration.Describe().c_str(), skip.empty() ? "" : ", last skip: ",
+             skip.c_str());
     return buf;
 }
 
@@ -1597,8 +1649,8 @@ void RendererImpl::ScriptTick()
 // -------------------------------------------------------------------------------------------------
 void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, const track::BindingRecord& record)
 {
-    if (!state.sawReset)
-        return; // root / heap state unknown (list first seen mid-recording)
+    if (!state.sawReset || state.stateUnknown)
+        return; // root / heap state unknown (list first seen mid-recording, or a bundle was executed)
     const track::FrameAnalyzer& analyzer = track::Analyzer();
     const bool prepare = !state.injectedPrepare && analyzer.MatchPrepare(state, record);
     const bool composite = !state.injectedComposite && analyzer.MatchComposite(state, record);
@@ -1634,6 +1686,11 @@ void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, c
         state.injectedComposite = true;
         r.Composite(list, state, rec, cfg);
     }
+}
+
+void OnListsExecuted(UINT count, ID3D12CommandList* const* lists)
+{
+    Instance().OnListsExecuted(count, lists);
 }
 
 void OnScriptTick()

@@ -46,6 +46,8 @@ struct BindingRecord
     int32_t mrtOrdinal = -1;   // ordinal among this list's MRT bindings (>= 3 RTVs + DSV, draws > 0)
     int32_t hdrOrdinal = -1;   // ordinal among this list's float-RTV0 bindings with draws > 0
     uint32_t listSeq = 0;      // index of the binding within the list
+    uint32_t mrtBefore = 0;    // MRT-candidate bindings closed earlier in the same list
+    uint32_t hdrBefore = 0;    // HDR-candidate bindings closed earlier in the same list
     uint32_t barrierSeqAtLastDraw = 0;
     bool fromRenderPass = false;
     bool noInjectAfter = false; // suspending render pass / PRESERVE_LOCAL ending access: nothing may follow
@@ -104,6 +106,8 @@ struct ListState
     // middle of a recording has an unknown root / heap state that RestoreState could not restore,
     // so RTSky never injects into it before its next Reset.
     bool sawReset = false;
+    // Set when the list executed a bundle: root / pipeline state inherited from it is unknown.
+    bool stateUnknown = false;
 
     // Pipeline: the last of SetPipelineState / SetPipelineState1 wins.
     enum class PipelineKind : uint8_t { None, Pso, StateObject };
@@ -150,6 +154,8 @@ struct ListState
     // Injection bookkeeping (owned by the Renderer)
     bool injectedPrepare = false;
     bool injectedComposite = false;
+    uint64_t preparedSerial = 0;          // Prepare recorded into this list (serial), 0 = none
+    uint64_t compositeConsumedSerial = 0; // Prepare serial the Composite in this list paired with
     // Objects referenced by commands RTSky recorded into this list; kept alive until the GPU has
     // finished every execution of the list (see render::GpuLifetime).
     std::vector<std::shared_ptr<void>> attachments;
@@ -180,6 +186,11 @@ void OnEnhancedBarrier(ListState& s, UINT count, const D3D12_BARRIER_GROUP* grou
 // State of subresource 0 of `resource` if a barrier covering it was recorded on this list after
 // barrier sequence `afterSeq` (e.g. after the last draw of a binding); false if none (caller infers).
 bool FindObservedState(const ListState& s, ID3D12Resource* resource, uint32_t afterSeq, ObservedState* out);
+
+// Command signatures: whether ExecuteIndirect with a signature draws (DRAW / DRAW_INDEXED /
+// DISPATCH_MESH) or only dispatches. Unknown signatures (created before RTSky hooked) count as draws.
+void NoteCommandSignature(ID3D12CommandSignature* signature, bool draws);
+bool CommandSignatureDraws(ID3D12CommandSignature* signature);
 
 // Global knowledge about which barrier API the game uses per resource
 enum class BarrierApi : uint8_t { Unknown, Legacy, Enhanced };

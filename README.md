@@ -130,6 +130,14 @@ cmake --build build-mingw
 
 All shaders are compiled to DXIL at build time and embedded in the `.asi`.
 
+Host tests (no Windows SDK needed): the math tests and frame-analyzer scenarios, which run the real
+tracker and analyzer sources against simulated frames.
+
+```sh
+cmake -S tests -B build-tests -DRTSKY_DIRECTX_HEADERS_DIR=/path/to/DirectX-Headers
+cmake --build build-tests && ctest --test-dir build-tests --output-on-failure
+```
+
 ## Credits
 
 * Atmosphere: S. Hillaire, *A Scalable and Production Ready Sky and Atmosphere Rendering Technique*,
