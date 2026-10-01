@@ -68,7 +68,11 @@ enum SetTable : uint32_t
 };
 constexpr uint32_t kSetRegions = 3;
 constexpr uint32_t kSetRegionSize = ST_Count * kTableSize;
-constexpr uint32_t kHeapSize = kSetBase + kSetRegions * kSetRegionSize;
+// One acceleration-structure SRV per injection slot (rewritten at submit time, see OnSubmit) and a
+// null one for passes that do not trace.
+constexpr uint32_t kTlasBase = kSetBase + kSetRegions * kSetRegionSize;
+constexpr uint32_t kTlasNull = kTlasBase + kSlotCount;
+constexpr uint32_t kHeapSize = kTlasNull + 1;
 
 constexpr uint32_t kConstantSlotSize = 1024;
 constexpr uint32_t kReadbackSlotSize = 256;
@@ -202,7 +206,7 @@ public:
     void Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     void Composite(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     std::string Status();
-    void OnListsExecuted(UINT count, ID3D12CommandList* const* lists);
+    void OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
     void RequestReset() { m_resetRequested.store(true); }
     void ReleaseRegion(uint32_t region);
     void ScriptTick();
@@ -236,7 +240,8 @@ private:
     void OnSlotReleased(uint32_t slot);
 
     // Recording helpers
-    void BeginPasses(ID3D12GraphicsCommandList* list, uint32_t slot, D3D12_GPU_VIRTUAL_ADDRESS tlas);
+    void BeginPasses(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t tlasDescriptor);
+    void TlasSrv(uint32_t index, D3D12_GPU_VIRTUAL_ADDRESS address);
     void Run(ID3D12GraphicsCommandList* list, Pso pso, uint32_t srvBase, uint32_t uavBase, UINT gx, UINT gy, UINT gz, const gpu::PassConstants* pc = nullptr);
     void FillConstants(gpu::FrameConstants& fc, const PendingFrame& f, const CameraFrame* prev, const Config& cfg, bool reset,
                        int tlasSpace, const float3& camPosForTlas, UINT targetX, UINT targetY, UINT targetW, UINT targetH, bool srgbTarget);
@@ -331,6 +336,7 @@ private:
     std::atomic<uint64_t> m_prepares{ 0 };
     std::atomic<uint64_t> m_lastExecutedPrepare{ 0 };
     std::atomic<uint64_t> m_pairingLag{ 0 };
+    std::atomic<uint64_t> m_lateTlas{ 0 }; // composites upgraded to a newer TLAS at submission
     std::atomic<uint64_t> m_composites{ 0 };
     std::string m_lastSkip;
     ULONGLONG m_lastStatusLog = 0;
@@ -432,8 +438,10 @@ bool RendererImpl::Initialize(ID3D12Device5* device)
     if (!CreateRootSignature() || !CreatePipelines() || !CreateGlobalResources())
         return false;
 
-    for (uint32_t i = 0; i < kHeapSize; i += kTableSize)
+    for (uint32_t i = 0; i + kTableSize <= kTlasBase; i += kTableSize)
         NullTable(i);
+    for (uint32_t i = kTlasBase; i <= kTlasNull; ++i)
+        TlasSrv(i, 0); // null acceleration structure: every ray misses
 
     // Global tables
     NullTable(kGlobalBase + GT_Transmittance * kTableSize);
@@ -475,10 +483,13 @@ bool RendererImpl::CreateRootSignature()
         D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
     CD3DX12_DESCRIPTOR_RANGE1 srvRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kTableSrv, 0, 0, rangeFlags);
     CD3DX12_DESCRIPTOR_RANGE1 uavRange(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kTableUav, 0, 0, rangeFlags);
+    // The TLAS is a descriptor (not a root SRV) so that it can still be changed after recording, up to
+    // submission (DESCRIPTORS_VOLATILE): see OnSubmit.
+    CD3DX12_DESCRIPTOR_RANGE1 tlasRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 1, rangeFlags);
 
     CD3DX12_ROOT_PARAMETER1 params[5];
     params[0].InitAsConstantBufferView(0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE);
-    params[1].InitAsShaderResourceView(0, 1, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE);
+    params[1].InitAsDescriptorTable(1, &tlasRange);
     params[2].InitAsConstants(sizeof(gpu::PassConstants) / 4, 1, 0);
     params[3].InitAsDescriptorTable(1, &srvRange);
     params[4].InitAsDescriptorTable(1, &uavRange);
@@ -877,14 +888,24 @@ void RendererImpl::OnSlotReleased(uint32_t slot)
 // -------------------------------------------------------------------------------------------------
 // Recording helpers
 // -------------------------------------------------------------------------------------------------
-void RendererImpl::BeginPasses(ID3D12GraphicsCommandList* list, uint32_t slot, D3D12_GPU_VIRTUAL_ADDRESS tlas)
+void RendererImpl::TlasSrv(uint32_t index, D3D12_GPU_VIRTUAL_ADDRESS address)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
+    d.Format = DXGI_FORMAT_UNKNOWN;
+    d.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    d.RaytracingAccelerationStructure.Location = address;
+    hooks::HookBypass bypass;
+    m_device->CreateShaderResourceView(nullptr, &d, Cpu(index));
+}
+
+void RendererImpl::BeginPasses(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t tlasDescriptor)
 {
     ID3D12DescriptorHeap* heaps[] = { m_heap.Get() };
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(m_rootSignature.Get());
     list->SetComputeRootConstantBufferView(0, m_constants->GetGPUVirtualAddress() + UINT64(slot) * kConstantSlotSize);
-    // Root SRV 1 is only read by the trace and probe shaders; give it a valid address otherwise.
-    list->SetComputeRootShaderResourceView(1, tlas != 0 ? tlas : m_skyData->GetGPUVirtualAddress());
+    list->SetComputeRootDescriptorTable(1, Gpu(tlasDescriptor));
     gpu::PassConstants zero = {};
     list->SetComputeRoot32BitConstants(2, sizeof(zero) / 4, &zero, 0);
 }
@@ -1237,7 +1258,7 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     own.Use(set.normal[f.parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     own.Flush(list);
 
-    BeginPasses(list, slot, 0);
+    BeginPasses(list, slot, kTlasNull);
     Run(list, Pso::Prepare, slotBase, SetTableBase(set, ST_PrepareUav + f.parity) + kTableSrv, DivUp(w, RTSKY_GROUP_SIZE),
         DivUp(h, RTSKY_GROUP_SIZE), 1);
 
@@ -1401,7 +1422,9 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
 
     OwnTracker own;
     const uint32_t p = f.parity;
-    BeginPasses(list, slot, tlas.address);
+    // Provisional TLAS; OnSubmit may still replace it with a newer clone ordered before this list.
+    TlasSrv(kTlasBase + slot, tlas.address);
+    BeginPasses(list, slot, kTlasBase + slot);
 
     // Atmosphere. The transmittance / multi-scattering LUTs are tiny (16K + 1K threads) and are
     // rebuilt every frame: a "built once" flag set at record time would be wrong if that list were
@@ -1517,6 +1540,8 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
             state.tlasConsumedValid = true;
         }
         state.compositeConsumedSerial = f.prepareSerial;
+        if (!tlasFromThisList)
+            state.tlasDescriptor = static_cast<int32_t>(kTlasBase + slot);
         m_lastTlasSerial = tlas.buildSerial;
         m_lastCompositePrepareSerial = f.prepareSerial;
         m_lastCompositeCamera = f.camera;
@@ -1574,6 +1599,8 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         state.tlasConsumedValid = true;
     }
     state.compositeConsumedSerial = f.prepareSerial;
+    if (!tlasFromThisList)
+        state.tlasDescriptor = static_cast<int32_t>(kTlasBase + slot);
     if (sceneCopy)
         Lifetime().Attach(state, std::static_pointer_cast<void>(sceneCopy));
 
@@ -1591,8 +1618,43 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     ReleaseSRWLockExclusive(&m_lock);
 }
 
-void RendererImpl::OnListsExecuted(UINT count, ID3D12CommandList* const* lists)
+void RendererImpl::OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
+    // Late TLAS binding. At recording time the Composite could only use a clone whose producing list
+    // was already submitted (or completed); now, at submission, the GPU order is known: a clone
+    // written by an earlier list of this same call, or one submitted earlier on this queue, runs
+    // before this list. Use the newest such clone (normally this frame's) instead of the provisional
+    // one. One-shot per recording: a re-executed list keeps its descriptor (a previous execution
+    // may still be reading it).
+    if (m_init.load(std::memory_order_acquire) == InitState::Ready)
+    {
+        for (UINT i = 0; i < count; ++i)
+        {
+            ListState* s = track::FindListState(lists[i]);
+            if (s == nullptr || s->tlasDescriptor < 0)
+                continue;
+            track::TlasInfo best = s->tlasConsumed;
+            for (UINT j = 0; j < i; ++j)
+            {
+                const ListState* p = track::FindListState(lists[j]);
+                if (p != nullptr && p->tlasProducedValid && p->tlasProduced.buildSerial > best.buildSerial)
+                    best = p->tlasProduced;
+            }
+            track::TlasInfo published;
+            if (track::Tlas().GetSceneTlas(&published, queue) && published.buildSerial > best.buildSerial)
+                best = published;
+            if (best.buildSerial != s->tlasConsumed.buildSerial && best.address != 0)
+            {
+                TlasSrv(static_cast<uint32_t>(s->tlasDescriptor), best.address);
+                Lifetime().Attach(*s, best.cloneHolder); // copied into this submission's lifetime batch
+                s->tlasConsumed = best;
+                m_lateTlas.fetch_add(1, std::memory_order_relaxed);
+            }
+            s->tlasDescriptor = -1;
+        }
+    }
+
+    {
     // Prepare and Composite are paired at recording time. With parallel recording the lighting list
     // can be recorded before this frame's G-buffer list, and the Composite then pairs with the
     // previous frame's Prepare (one frame of lag). Detect it in GPU order and report it.
@@ -1610,6 +1672,7 @@ void RendererImpl::OnListsExecuted(UINT count, ID3D12CommandList* const* lists)
                          "(see docs/CALIBRATION.md, 'Pairing')");
         }
     }
+    }
 }
 
 std::string RendererImpl::Status()
@@ -1626,10 +1689,10 @@ std::string RendererImpl::Status()
     std::string skip = m_lastSkip;
     ReleaseSRWLockShared(&m_lock);
     char buf[512];
-    snprintf(buf, sizeof(buf), "renderer %s, %llu prepares, %llu composites (%llu paired late), calibration: %s%s%s", init,
-             static_cast<unsigned long long>(m_prepares.load()), static_cast<unsigned long long>(m_composites.load()),
-             static_cast<unsigned long long>(m_pairingLag.load()), m_calibration.Describe().c_str(), skip.empty() ? "" : ", last skip: ",
-             skip.c_str());
+    snprintf(buf, sizeof(buf), "renderer %s, %llu prepares, %llu composites (%llu paired late, %llu TLAS bound at submit), calibration: %s%s%s",
+             init, static_cast<unsigned long long>(m_prepares.load()), static_cast<unsigned long long>(m_composites.load()),
+             static_cast<unsigned long long>(m_pairingLag.load()), static_cast<unsigned long long>(m_lateTlas.load()),
+             m_calibration.Describe().c_str(), skip.empty() ? "" : ", last skip: ", skip.c_str());
     return buf;
 }
 
@@ -1689,9 +1752,9 @@ void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, c
     }
 }
 
-void OnListsExecuted(UINT count, ID3D12CommandList* const* lists)
+void OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
-    Instance().OnListsExecuted(count, lists);
+    Instance().OnSubmit(queue, count, lists);
 }
 
 void OnScriptTick()

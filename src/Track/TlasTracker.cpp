@@ -245,9 +245,11 @@ bool TlasTracker::ProducerDone(const TlasInfo& info)
     return !info.producerFence || info.producerFence->GetCompletedValue() >= info.producerFenceValue;
 }
 
-bool TlasTracker::GetSceneTlas(TlasInfo* out)
+bool TlasTracker::GetSceneTlas(TlasInfo* out, ID3D12CommandQueue* consumerQueue)
 {
     AcquireSRWLockExclusive(&m_lock);
+    if (consumerQueue == nullptr)
+        consumerQueue = m_consumerQueue;
     bool ok = false;
     for (uint32_t i = 0; i < m_historyCount && !ok; ++i)
     {
@@ -258,7 +260,7 @@ bool TlasTracker::GetSceneTlas(TlasInfo* out)
         // A clone still being produced is only safe on the queue that will run the consumer (same
         // queue = submission order). Waiting on another queue's fence could deadlock with the
         // game's own cross-queue waits, so otherwise only completed clones qualify.
-        if (ProducerDone(h) || (h.producerQueue != nullptr && h.producerQueue == m_consumerQueue))
+        if (ProducerDone(h) || (h.producerQueue != nullptr && h.producerQueue == consumerQueue))
         {
             *out = h;
             if (h.cloneSlot >= 0)
