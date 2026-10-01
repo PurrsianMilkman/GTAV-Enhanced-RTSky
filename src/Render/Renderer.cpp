@@ -1803,6 +1803,9 @@ void RendererImpl::ScriptTick()
     if (now - m_lastStatusLog >= 10000)
     {
         m_lastStatusLog = now;
+        // The same verdict the on-screen status shows, so a log alone tells which stage stops RTSky.
+        const std::vector<std::string> lines = OverlayLines(ConfigSnapshot());
+        LOG_INFO("%s", lines.empty() ? "" : lines[0].c_str());
         LOG_INFO("Status: %s | analyzer: %s", Status().c_str(), track::Analyzer().Status().c_str());
     }
 }
