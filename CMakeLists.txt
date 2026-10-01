@@ -24,13 +24,24 @@ if(RTSKY_DIRECTX_HEADERS_DIR)
     set(DXH_ROOT "${RTSKY_DIRECTX_HEADERS_DIR}")
 else()
     include(FetchContent)
-    FetchContent_Declare(directx_headers
-        GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
-        GIT_TAG v1.619.5
-        GIT_SHALLOW TRUE)
-    FetchContent_GetProperties(directx_headers)
-    if(NOT directx_headers_POPULATED)
-        FetchContent_Populate(directx_headers)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+        # Headers only: point SOURCE_SUBDIR at a directory without CMakeLists.txt so that nothing of
+        # DirectX-Headers' own build (tests, targets) is added.
+        FetchContent_Declare(directx_headers
+            GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
+            GIT_TAG v1.619.5
+            GIT_SHALLOW TRUE
+            SOURCE_SUBDIR include)
+        FetchContent_MakeAvailable(directx_headers)
+    else()
+        FetchContent_Declare(directx_headers
+            GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
+            GIT_TAG v1.619.5
+            GIT_SHALLOW TRUE)
+        FetchContent_GetProperties(directx_headers)
+        if(NOT directx_headers_POPULATED)
+            FetchContent_Populate(directx_headers)
+        endif()
     endif()
     set(DXH_ROOT "${directx_headers_SOURCE_DIR}")
 endif()
@@ -144,6 +155,7 @@ target_compile_definitions(RTSky PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _U
 
 if(MSVC)
     target_compile_options(RTSky PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /wd4100 /wd4324)
+    target_compile_definitions(RTSky PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(RTSky PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
     # MinGW ships rpcndr.h version 475; DirectX-Headers only asks for >= 500 as a MIDL sanity check.

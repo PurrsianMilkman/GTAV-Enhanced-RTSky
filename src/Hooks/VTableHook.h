@@ -69,6 +69,7 @@ private:
     {
         void** vtable = nullptr;
         void* originals[kMaxSlots] = {};
+        bool chained[kMaxSlots] = {};
     };
 
     void* OriginalSlow(void** vtable, uint32_t slot) const;
