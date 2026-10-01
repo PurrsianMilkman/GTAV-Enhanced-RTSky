@@ -144,6 +144,10 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     observed.clear();
     barrierSeq = 0;
     tlasBuilds = blasBuilds = dispatchRays = draws = 0;
+    tlasProducedValid = false;
+    tlasProduced = TlasInfo{};
+    tlasConsumedValid = false;
+    tlasConsumed = TlasInfo{};
     injectedPrepare = false;
     injectedComposite = false;
     attachments.clear();
@@ -254,6 +258,16 @@ void OnBeginRenderPass(ListState& s, UINT count, const D3D12_RENDER_PASS_RENDER_
     s.inRenderPass = true;
     BindingRecord& r = s.current;
     r.fromRenderPass = true;
+    r.noInjectAfter = (flags & D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) != 0;
+    auto preserveLocal = [](D3D12_RENDER_PASS_ENDING_ACCESS_TYPE t) {
+        return t == D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE_LOCAL_RENDER ||
+               t == D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE_LOCAL_SRV ||
+               t == D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE_LOCAL_UAV;
+    };
+    for (UINT i = 0; i < count && rts != nullptr; ++i)
+        r.noInjectAfter |= preserveLocal(rts[i].EndingAccess.Type);
+    if (ds != nullptr)
+        r.noInjectAfter |= preserveLocal(ds->DepthEndingAccess.Type) || preserveLocal(ds->StencilEndingAccess.Type);
     count = count > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ? D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT : count;
     r.rtvCount = 0;
     for (UINT i = 0; i < count && rts != nullptr; ++i)
@@ -328,16 +342,30 @@ void OnResourceBarrier(ListState& s, UINT count, const D3D12_RESOURCE_BARRIER* b
         const D3D12_RESOURCE_BARRIER& b = barriers[i];
         if (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || b.Transition.pResource == nullptr)
             continue;
-        if ((b.Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) != 0)
-            continue; // split barrier: the transition completes at END_ONLY
-        ObservedState o;
-        o.stateOrLayout = static_cast<uint32_t>(b.Transition.StateAfter);
+        NoteBarrierApi(b.Transition.pResource, BarrierApi::Legacy);
+        // Only barriers covering subresource 0 (all subresources, or subresource index 0) matter.
+        if (b.Transition.Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES && b.Transition.Subresource != 0)
+            continue;
+        ObservedState& o = s.observed[b.Transition.pResource];
         o.enhanced = false;
         o.seq = ++s.barrierSeq;
-        o.subresource = b.Transition.Subresource;
-        s.observed[b.Transition.pResource] = o;
-        NoteBarrierApi(b.Transition.pResource, BarrierApi::Legacy);
+        if ((b.Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) != 0)
+        {
+            o.splitPending = true; // the transition completes at the matching END_ONLY barrier
+            o.stateOrLayout = static_cast<uint32_t>(b.Transition.StateBefore);
+            continue;
+        }
+        o.splitPending = false;
+        o.stateOrLayout = static_cast<uint32_t>(b.Transition.StateAfter);
     }
+}
+
+// True if an enhanced-barrier subresource range covers mip 0 / array slice 0 / plane 0.
+static bool CoversSubresourceZero(const D3D12_BARRIER_SUBRESOURCE_RANGE& r)
+{
+    if (r.NumMipLevels == 0)
+        return r.IndexOrFirstMipLevel == 0 || r.IndexOrFirstMipLevel == 0xFFFFFFFFu; // single index, or "all"
+    return r.IndexOrFirstMipLevel == 0 && r.FirstArraySlice == 0 && r.NumArraySlices > 0 && r.FirstPlane == 0 && r.NumPlanes > 0;
 }
 
 void OnEnhancedBarrier(ListState& s, UINT count, const D3D12_BARRIER_GROUP* groups)
@@ -352,13 +380,17 @@ void OnEnhancedBarrier(ListState& s, UINT count, const D3D12_BARRIER_GROUP* grou
             const D3D12_TEXTURE_BARRIER& b = groups[g].pTextureBarriers[i];
             if (b.pResource == nullptr)
                 continue;
-            ObservedState o;
-            o.stateOrLayout = static_cast<uint32_t>(b.LayoutAfter);
+            NoteBarrierApi(b.pResource, BarrierApi::Enhanced);
+            if (!CoversSubresourceZero(b.Subresources))
+                continue;
+            ObservedState& o = s.observed[b.pResource];
             o.enhanced = true;
             o.seq = ++s.barrierSeq;
-            o.subresource = (b.Subresources.NumMipLevels == 0) ? b.Subresources.IndexOrFirstMipLevel : 0xFFFFFFFFu;
-            s.observed[b.pResource] = o;
-            NoteBarrierApi(b.pResource, BarrierApi::Enhanced);
+            o.stateOrLayout = static_cast<uint32_t>(b.LayoutAfter);
+            o.syncAfter = b.SyncAfter;
+            o.accessAfter = b.AccessAfter;
+            // Split barriers: SyncAfter == SPLIT begins one, SyncBefore == SPLIT ends it.
+            o.splitPending = b.SyncAfter == D3D12_BARRIER_SYNC_SPLIT;
         }
     }
 }
@@ -366,7 +398,10 @@ void OnEnhancedBarrier(ListState& s, UINT count, const D3D12_BARRIER_GROUP* grou
 bool FindObservedState(const ListState& s, ID3D12Resource* resource, uint32_t afterSeq, ObservedState* out)
 {
     auto it = s.observed.find(resource);
-    if (it == s.observed.end() || it->second.seq <= afterSeq)
+    if (it == s.observed.end())
+        return false;
+    // A split barrier still in flight must be reported even if it began before `afterSeq`.
+    if (it->second.seq <= afterSeq && !it->second.splitPending)
         return false;
     *out = it->second;
     return true;

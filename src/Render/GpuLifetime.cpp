@@ -52,19 +52,26 @@ GpuLifetime::QueueTimeline* GpuLifetime::TimelineFor(ID3D12CommandQueue* queue)
     return m_timelines.back().get();
 }
 
-void GpuLifetime::OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+bool GpuLifetime::OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists,
+                             ComPtr<ID3D12Fence>* signalledFence, uint64_t* signalledValue)
 {
     std::vector<std::shared_ptr<void>> batch;
+    bool needSignal = false;
     for (UINT i = 0; i < count; ++i)
     {
         track::ListState* s = track::FindListState(lists[i]);
-        if (s == nullptr || s->attachments.empty())
+        if (s == nullptr)
+            continue;
+        // A list that produced a scene TLAS needs a fence value even without attachments (clone
+        // disabled): consumers on other queues wait for it.
+        needSignal = needSignal || s->tlasProducedValid;
+        if (s->attachments.empty())
             continue;
         // Copy (not move): a closed list may legally be executed more than once.
         batch.insert(batch.end(), s->attachments.begin(), s->attachments.end());
     }
-    if (batch.empty())
-        return;
+    if (batch.empty() && !needSignal)
+        return false;
 
     AcquireSRWLockExclusive(&m_lock);
     QueueTimeline* t = TimelineFor(queue);
@@ -75,7 +82,7 @@ void GpuLifetime::OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12Comman
         RTSKY_LOG_ONCE(log::Level::Error, "GpuLifetime: no fence, leaking attachments");
         for (auto& p : batch)
             (void)new std::shared_ptr<void>(p);
-        return;
+        return false;
     }
     const uint64_t value = ++t->lastSignaled;
     {
@@ -83,7 +90,12 @@ void GpuLifetime::OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12Comman
         queue->Signal(t->fence.Get(), value);
     }
     t->pending.emplace_back(value, std::move(batch));
+    if (signalledFence != nullptr)
+        *signalledFence = t->fence;
+    if (signalledValue != nullptr)
+        *signalledValue = value;
     ReleaseSRWLockExclusive(&m_lock);
+    return true;
 }
 
 void GpuLifetime::Collect()

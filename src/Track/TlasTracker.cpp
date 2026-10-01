@@ -6,17 +6,39 @@
 #include "../Common/D3D12Compat.h"
 #include "../Render/GpuLifetime.h"
 
+#include <algorithm>
+
 namespace rtsky::track {
 
 using Microsoft::WRL::ComPtr;
 
-bool TlasTracker::EnsureCloneBuffer(ID3D12Device5* device, uint32_t slot, UINT64 size)
+int TlasTracker::AcquireCloneSlot(ID3D12Device5* device, UINT64 size)
 {
-    if (m_clones[slot] && m_cloneSizes[slot] >= size)
-        return true;
+    // A slot is free when nothing but the ring references its holder: every list that wrote or reads
+    // the clone keeps a copy of the holder until the GPU has finished with it (GpuLifetime), and the
+    // published / pending TlasInfo copies hold one too. Copies are only made from existing
+    // references, so use_count() == 1 cannot rise concurrently (the ring is only touched under m_lock).
+    int slot = -1;
+    for (uint32_t i = 0; i < kCloneRing; ++i)
+    {
+        const uint32_t k = (m_nextClone + i) % kCloneRing;
+        if (!m_cloneHolders[k] || m_cloneHolders[k].use_count() == 1)
+        {
+            slot = static_cast<int>(k);
+            break;
+        }
+    }
+    const bool allBusy = slot < 0;
+    if (allBusy)
+        slot = static_cast<int>(m_nextClone); // replaced below; the old buffer lives on through its holders
+    m_nextClone = (static_cast<uint32_t>(slot) + 1) % kCloneRing;
+
+    if (!allBusy && m_clones[slot] && m_cloneSizes[slot] >= size)
+        return slot;
 
     // Grow with headroom so that instance-count jitter does not reallocate every frame.
-    UINT64 allocSize = (size + size / 4 + 65535) & ~UINT64(65535);
+    const UINT64 needed = std::max(size, allBusy ? m_cloneSizes[slot] : UINT64(0));
+    const UINT64 allocSize = (needed + needed / 4 + 65535) & ~UINT64(65535);
 
     D3D12_HEAP_PROPERTIES heap = {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -38,14 +60,15 @@ bool TlasTracker::EnsureCloneBuffer(ID3D12Device5* device, uint32_t slot, UINT64
     {
         LOG_ERROR("TLAS clone buffer allocation (%llu bytes) failed: 0x%08X", static_cast<unsigned long long>(allocSize),
                   static_cast<unsigned>(hr));
-        return false;
+        return -1;
     }
     buffer->SetName(L"RTSky TLAS clone");
-    // The previous buffer stays alive through the references held by in-flight lists / slots.
     m_clones[slot] = buffer;
+    m_cloneHolders[slot] = render::KeepAlive(buffer.Get());
     m_cloneSizes[slot] = allocSize;
-    LOG_INFO("TLAS clone buffer %u: %llu bytes", slot, static_cast<unsigned long long>(allocSize));
-    return true;
+    LOG_INFO("TLAS clone buffer %d: %llu bytes%s", slot, static_cast<unsigned long long>(allocSize),
+             allBusy ? " (all slots in flight)" : "");
+    return slot;
 }
 
 void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
@@ -130,11 +153,9 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
         {
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild = {};
             device->GetRaytracingAccelerationStructurePrebuildInfo(&desc->Inputs, &prebuild);
-            const uint32_t slot = m_nextClone;
-            if (prebuild.ResultDataMaxSizeInBytes > 0 && EnsureCloneBuffer(device.Get(), slot, prebuild.ResultDataMaxSizeInBytes))
+            const int slot = prebuild.ResultDataMaxSizeInBytes > 0 ? AcquireCloneSlot(device.Get(), prebuild.ResultDataMaxSizeInBytes) : -1;
+            if (slot >= 0)
             {
-                m_nextClone = (m_nextClone + 1) % kCloneRing;
-
                 // build -> (UAV barrier) -> clone -> (UAV barrier): the game may rebuild or update the
                 // same destination later in this list, which must not overlap our read.
                 D3D12_RESOURCE_BARRIER uav = {};
@@ -145,14 +166,30 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
                 list->CopyRaytracingAccelerationStructure(cloneAddress, dest, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE);
                 list->ResourceBarrier(1, &uav);
 
-                render::Lifetime().Attach(state, m_clones[slot]);
+                render::Lifetime().Attach(state, m_cloneHolders[slot]);
                 info.address = cloneAddress;
-                info.cloneBuffer = m_clones[slot];
+                info.cloneHolder = m_cloneHolders[slot];
             }
         }
     }
 
-    m_latest = info;
+    // Not visible to other lists before this one is submitted (see Publish).
+    state.tlasProduced = info;
+    state.tlasProducedValid = true;
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+void TlasTracker::Publish(const TlasInfo& produced, ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value)
+{
+    AcquireSRWLockExclusive(&m_lock);
+    // Lists can be submitted out of recording order: never go back to an older build.
+    if (produced.buildSerial >= m_latest.buildSerial)
+    {
+        m_latest = produced;
+        m_latest.producerQueue = queue;
+        m_latest.producerFence = fence;
+        m_latest.producerFenceValue = value;
+    }
     ReleaseSRWLockExclusive(&m_lock);
 }
 
