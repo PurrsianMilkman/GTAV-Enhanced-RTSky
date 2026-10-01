@@ -15,7 +15,7 @@ float TraceVisibility(float3 origin, float3 dir, float tMin, float tMax)
     while (q.Proceed())
     {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE &&
-            FoliageAccept(q.CandidateInstanceIndex(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
+            FoliageAccept(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
         {
             q.CommitNonOpaqueTriangleHit();
         }
@@ -36,7 +36,7 @@ float TraceDistance(float3 origin, float3 dir, float tMin, float tMax)
     while (q.Proceed())
     {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE &&
-            FoliageAccept(q.CandidateInstanceIndex(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
+            FoliageAccept(q.CandidateInstanceID(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
         {
             q.CommitNonOpaqueTriangleHit();
         }

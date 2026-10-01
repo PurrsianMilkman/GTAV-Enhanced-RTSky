@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -95,8 +96,14 @@ public:
     }
     void Get(const char* key, float& v) const
     {
+        // Unparsable, NaN and infinite values keep the default.
         if (const std::string* s = Find(key))
-            v = std::strtof(s->c_str(), nullptr);
+        {
+            char* end = nullptr;
+            const float parsed = std::strtof(s->c_str(), &end);
+            if (end != s->c_str() && std::isfinite(parsed))
+                v = parsed;
+        }
     }
     // "auto" -> autoValue, otherwise integer
     void GetAutoInt(const char* key, int& v, int autoValue) const
@@ -220,6 +227,26 @@ bool Config::Load(const std::wstring& path)
     instanceMask &= 0xFFu;
     debugView = Clamp(debugView, 0, 8);
     dayLengthHours = Clamp(dayLengthHours, 1.0f, 23.0f);
+    // Ray extents: tMin > 0 (self-intersection), maxRayDistance beyond tMin, near field inside the ray.
+    tMin = Clamp(tMin, 1e-4f, 10.0f);
+    maxRayDistance = Clamp(maxRayDistance, tMin + 1.0f, 100000.0f);
+    nearFieldRadius = Clamp(nearFieldRadius, 0.0f, maxRayDistance);
+    normalBias = Clamp(normalBias, 0.0f, 1.0f);
+    distanceBias = Clamp(distanceBias, 0.0f, 0.1f);
+    // Denoiser weights: pow(0, 0) is NaN, zero sigmas divide by zero.
+    normalPower = Clamp(normalPower, 1.0f, 512.0f);
+    sigmaPlane = Clamp(sigmaPlane, 1e-4f, 10.0f);
+    sigmaLuminance = Clamp(sigmaLuminance, 1e-3f, 100.0f);
+    depthReject = Clamp(depthReject, 1e-3f, 1.0f);
+    normalReject = Clamp(normalReject, -1.0f, 1.0f);
+    sunSoftness = Clamp(sunSoftness, 1.0f, 50.0f);
+    fovScale = Clamp(fovScale, 0.25f, 4.0f);
+    fadeStart = std::max(fadeStart, 0.0f); // FadeEnd <= FadeStart disables the distance fade
+    sunIntensity = std::max(sunIntensity, 0.0f);
+    moonIntensity = std::max(moonIntensity, 0.0f);
+    mieScale = Clamp(mieScale, 0.0f, 100.0f);
+    atmosphereGroundAlbedo = Saturate(atmosphereGroundAlbedo);
+    minCalibrationScore = Saturate(minCalibrationScore);
     return true;
 }
 

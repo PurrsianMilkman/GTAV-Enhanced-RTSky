@@ -961,7 +961,7 @@ void RendererImpl::FillConstants(gpu::FrameConstants& fc, const PendingFrame& f,
     fc.compositeParams = F4(Saturate(cfg.strength), cfg.minRatio, cfg.maxRatio, std::max(cfg.gameSkyOcclusion, 0.0f));
     fc.compositeParams2 = F4(cfg.directScale, std::max(cfg.artificialAmbient, 0.0f), Saturate(cfg.groundAlbedo), 0.0f);
     fc.compositeParams3 = F4(fade, std::max(cfg.nearFadeDistance, 0.0f), static_cast<float>(cfg.debugView), srgbTarget ? 1.0f : 0.0f);
-    fc.compositeParams4 = F4(cfg.fadeStart, cfg.fadeEnd, dirs.sun.z > 0.0f ? 1.0f : 0.0f, 0.0f);
+    fc.compositeParams4 = F4(cfg.fadeStart, cfg.fadeEnd, 0.0f, 0.0f);
 
     // Calibration hypotheses: latency l (0..3) x TLAS space s (0 world, 1 camera-relative)
     for (int l = 0; l < Calibration::kLatencies; ++l)
@@ -1296,7 +1296,14 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     }
 
     ++m_frameIndex;
-    const bool runProbe = calibrating;
+    // The probe traces with an inline RayQuery, which cannot opt into opacity micromaps (that needs
+    // SM 6.9); traversing OMM BLASes without opting in is undefined behaviour. Calibration then needs
+    // explicit Latency / TlasSpace values (see docs/CALIBRATION.md).
+    const bool ommBlocksProbe = track::Tlas().OpacityMicromapsSeen();
+    const bool runProbe = calibrating && !ommBlocksProbe;
+    if (calibrating && ommBlocksProbe)
+        RTSKY_LOG_ONCE(log::Level::Warning, "The game uses opacity micromaps: the calibration probe is disabled. "
+                       "Set [Camera] Latency and TlasSpace explicitly to enable relighting.");
     uint32_t slot = 0;
     std::shared_ptr<void> slotHandle = ClaimSlot(&slot, m_frameIndex, runProbe, f.informative);
     if (!slotHandle)
