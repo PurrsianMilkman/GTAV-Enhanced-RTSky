@@ -44,7 +44,9 @@ public:
         return false;
     }
 
-    // Original function for `object`'s vtable and slot, or nullptr if the vtable is unknown.
+    // Original function for `object`'s vtable and slot. A vtable RTSky never patched (a copy of a
+    // patched one, made by the runtime or by an overlay that swaps an object's vtable pointer) is
+    // adopted on first use, so a hook never gets nullptr.
     void* Original(void* object, uint32_t slot) const
     {
         void** vtable = *static_cast<void***>(object);
@@ -73,6 +75,7 @@ private:
     };
 
     void* OriginalSlow(void** vtable, uint32_t slot) const;
+    void* Adopt(void** vtable, uint32_t slot);
     static bool WriteSlot(void** vtable, uint32_t slot, void* value);
 
     const char* m_name;

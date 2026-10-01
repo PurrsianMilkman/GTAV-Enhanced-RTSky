@@ -121,6 +121,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
     {
         DisableThreadLibraryCalls(instance);
         g_module = instance;
+        // Never unloaded: vtable hooks, the loader notification, the MinHook detour and deleters of
+        // in-flight GPU work all point into this module, so a FreeLibrary must not unmap it.
+        HMODULE pinned = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           reinterpret_cast<LPCWSTR>(&DllMain), &pinned);
         g_directory = ModuleDirectory(instance);
 
         rtsky::log::Init((g_directory + L"RTSky.log").c_str());
@@ -152,9 +157,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
             rtsky::game::SHV().KeyboardHandlerUnregister(&OnKeyboard);
             rtsky::game::SHV().ScriptUnregister(instance);
         }
-        // On process exit (reserved != nullptr) other threads are already gone: leave the hooks.
-        if (reserved == nullptr)
-            rtsky::hooks::Uninstall();
+        // The module is pinned, so this only runs at process exit: other threads are gone and the
+        // hooks stay in place (restoring them would race nothing but gains nothing either).
         LOG_INFO("RTSky unloaded");
         rtsky::log::Shutdown();
     }

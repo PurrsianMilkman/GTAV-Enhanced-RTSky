@@ -83,8 +83,10 @@ int ScriptHookV::GameVersion() const
 
 ScriptHookV& SHV()
 {
-    static ScriptHookV instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static ScriptHookV* instance = new ScriptHookV();
+    return *instance;
 }
 
 } // namespace rtsky::game

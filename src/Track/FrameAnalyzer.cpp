@@ -487,8 +487,10 @@ std::string FrameAnalyzer::Status() const
 
 FrameAnalyzer& Analyzer()
 {
-    static FrameAnalyzer instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static FrameAnalyzer* instance = new FrameAnalyzer();
+    return *instance;
 }
 
 } // namespace rtsky::track

@@ -46,7 +46,8 @@ private:
     // One fence per queue: signals on different queues complete in any order.
     struct QueueTimeline
     {
-        ID3D12CommandQueue* queue = nullptr; // not AddRef'd, only used as a key
+        ID3D12CommandQueue* queue = nullptr; // not AddRef'd, only used as a key (with the device:
+        ID3D12Device* device = nullptr;      // a recreated device can reuse a queue address)
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         uint64_t lastSignaled = 0;
         std::deque<std::pair<uint64_t, std::vector<std::shared_ptr<void>>>> pending;

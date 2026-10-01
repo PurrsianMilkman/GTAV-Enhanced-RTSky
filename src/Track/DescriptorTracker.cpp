@@ -107,6 +107,22 @@ void DescriptorTracker::OnCreateSRV(ID3D12Resource* resource, const D3D12_SHADER
         Erase(handle);
 }
 
+void DescriptorTracker::Copy(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src)
+{
+    ViewInfo info;
+    if (Lookup(src, &info))
+    {
+        Store(dst, info);
+        return;
+    }
+    Shard* s = ShardFor(dst.ptr);
+    AcquireSRWLockShared(&s->lock);
+    const bool present = s->map.find(dst.ptr) != s->map.end();
+    ReleaseSRWLockShared(&s->lock);
+    if (present)
+        Erase(dst);
+}
+
 bool DescriptorTracker::Lookup(D3D12_CPU_DESCRIPTOR_HANDLE handle, ViewInfo* out) const
 {
     Shard* s = ShardFor(handle.ptr);
@@ -133,8 +149,10 @@ size_t DescriptorTracker::Size() const
 
 DescriptorTracker& Descriptors()
 {
-    static DescriptorTracker instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static DescriptorTracker* instance = new DescriptorTracker();
+    return *instance;
 }
 
 } // namespace rtsky::track

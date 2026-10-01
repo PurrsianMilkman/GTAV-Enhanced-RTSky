@@ -134,8 +134,10 @@ EnvironmentSample GameData::GetEnvironment() const
 
 GameData& Game()
 {
-    static GameData instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static GameData* instance = new GameData();
+    return *instance;
 }
 
 } // namespace rtsky::game

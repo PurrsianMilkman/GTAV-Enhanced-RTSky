@@ -7,9 +7,9 @@
 //     only rewritten once no list that reads it can still be in flight (busy tokens);
 //   * a clone becomes visible to other lists only when the list that wrote it is SUBMITTED
 //     (Publish, from the ExecuteCommandLists hook). Recording order says nothing about GPU order.
-//     A list that traces a clone produced on another queue gets a queue Wait on the producer's
-//     fence inserted before it is submitted. A clone recorded earlier in the same list is ordered
-//     by the list itself and is preferred.
+//     A clone recorded earlier in the same list is ordered by the list itself and is preferred.
+//     Otherwise a clone from another queue is only used once its producer has completed (no GPU
+//     waits between queues are ever needed, so none can deadlock with the game's own waits).
 #pragma once
 
 #include <d3d12.h>
@@ -48,8 +48,16 @@ public:
     // once that submission has completed on the GPU.
     void Publish(const TlasInfo& produced, ID3D12CommandQueue* queue, ID3D12Fence* fence, uint64_t value);
 
-    // Latest SUBMITTED scene TLAS. Fails if nothing was published yet.
-    bool GetSceneTlas(TlasInfo* out) const;
+    // Newest SUBMITTED scene TLAS that a consumer may read without a cross-queue wait: one whose
+    // producing submission has completed, or one produced on the queue that runs RTSky's composite
+    // (NoteConsumerQueue). Fails if there is none yet.
+    bool GetSceneTlas(TlasInfo* out);
+
+    // The queue on which lists carrying RTSky's composite were last submitted.
+    void NoteConsumerQueue(ID3D12CommandQueue* queue);
+
+    // True when the producing submission of `info` has completed on the GPU (or was never tracked).
+    static bool ProducerDone(const TlasInfo& info);
 
     // Number of top-level builds recorded so far (all sizes), for statistics.
     uint64_t TopLevelBuilds() const;
@@ -75,7 +83,11 @@ private:
     UINT64 m_cloneSizes[kCloneRing] = {};
     uint32_t m_nextClone = 0;
 
-    TlasInfo m_latest;
+    TlasInfo m_latest;     // newest published clone
+    TlasInfo m_completed;  // newest published clone whose producer has completed
+    ID3D12CommandQueue* m_consumerQueue = nullptr; // not AddRef'd, compared only
+    ID3D12Device* m_device = nullptr;              // device of the clone ring (not AddRef'd)
+    uint64_t m_allocRetryAt = 0;                   // scene-build count before which allocation is not retried
     uint32_t m_maxInstancesRecent = 0;
     uint64_t m_topLevelBuilds = 0;
     uint64_t m_sceneBuilds = 0;

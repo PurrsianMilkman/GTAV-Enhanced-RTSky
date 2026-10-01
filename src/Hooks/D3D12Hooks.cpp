@@ -33,6 +33,7 @@ VTableHook g_list("ID3D12GraphicsCommandList");
 VTableHook g_queue("ID3D12CommandQueue");
 
 std::atomic<bool> g_installed{ false };
+std::atomic<bool> g_installFailed{ false };
 SRWLOCK g_installLock = SRWLOCK_INIT;
 UINT g_rtvIncrement = 0;
 UINT g_dsvIncrement = 0;
@@ -54,6 +55,64 @@ inline auto Orig(const VTableHook& hook, unsigned slot, Self* self, Args... args
 using CL = ID3D12GraphicsCommandList;
 
 // -------------------------------------------------------------------------------------------------
+// Command-list vtable patching
+// -------------------------------------------------------------------------------------------------
+// RTSky writes list slots up to Barrier (ID3D12GraphicsCommandList7). A list is only patched when it
+// is a DIRECT / COMPUTE list that implements ID3D12GraphicsCommandList7 on the same interface pointer;
+// anything else (video / copy lists, wrappers exposing an older interface) would have its vtable
+// written past its end. Rejected vtables are remembered so the check runs once per class.
+SRWLOCK g_rejectLock = SRWLOCK_INIT;
+void** g_rejected[32] = {};
+uint32_t g_rejectedCount = 0;
+
+bool IsRejectedVtable(void** vtable)
+{
+    AcquireSRWLockShared(&g_rejectLock);
+    bool found = false;
+    for (uint32_t i = 0; i < g_rejectedCount && !found; ++i)
+        found = g_rejected[i] == vtable;
+    ReleaseSRWLockShared(&g_rejectLock);
+    return found;
+}
+
+void RejectVtable(void** vtable, D3D12_COMMAND_LIST_TYPE type)
+{
+    AcquireSRWLockExclusive(&g_rejectLock);
+    if (g_rejectedCount < 32)
+        g_rejected[g_rejectedCount++] = vtable;
+    ReleaseSRWLockExclusive(&g_rejectLock);
+    if (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        LOG_WARN("Command list vtable %p (type %d) does not expose ID3D12GraphicsCommandList7; not tracked",
+                 static_cast<void*>(vtable), static_cast<int>(type));
+}
+
+// Returns true if the list is (now) patched.
+bool PatchList(ID3D12CommandList* list)
+{
+    if (list == nullptr || !g_installed.load())
+        return false;
+    if (g_list.IsKnownFast(list))
+        return true;
+    void** vtable = *reinterpret_cast<void***>(list);
+    if (IsRejectedVtable(vtable))
+        return false;
+    const D3D12_COMMAND_LIST_TYPE type = list->GetType();
+    bool ok = type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    if (ok)
+    {
+        ComPtr<ID3D12GraphicsCommandList7> list7;
+        ok = SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list7))) &&
+             static_cast<void*>(list7.Get()) == static_cast<void*>(list);
+    }
+    if (!ok)
+    {
+        RejectVtable(vtable, type);
+        return false;
+    }
+    return g_list.Patch(list);
+}
+
+// -------------------------------------------------------------------------------------------------
 // Device hooks
 // -------------------------------------------------------------------------------------------------
 HRESULT STDMETHODCALLTYPE Device_CreateCommandList(ID3D12Device* self, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type,
@@ -67,10 +126,8 @@ HRESULT STDMETHODCALLTYPE Device_CreateCommandList(ID3D12Device* self, UINT node
         (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE))
     {
         ComPtr<CL> cl;
-        if (SUCCEEDED(static_cast<IUnknown*>(*list)->QueryInterface(IID_PPV_ARGS(&cl))))
+        if (SUCCEEDED(static_cast<IUnknown*>(*list)->QueryInterface(IID_PPV_ARGS(&cl))) && PatchList(cl.Get()))
         {
-            if (!g_list.IsKnownFast(cl.Get()))
-                g_list.Patch(cl.Get());
             // A new list is created open: start its state like a Reset would.
             track::OnReset(*track::GetListState(cl.Get()), initial);
         }
@@ -87,8 +144,8 @@ HRESULT STDMETHODCALLTYPE Device_CreateCommandList1(ID3D12Device* self, UINT nod
         (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE))
     {
         ComPtr<CL> cl;
-        if (SUCCEEDED(static_cast<IUnknown*>(*list)->QueryInterface(IID_PPV_ARGS(&cl))) && !g_list.IsKnownFast(cl.Get()))
-            g_list.Patch(cl.Get()); // created closed; state starts at its first Reset
+        if (SUCCEEDED(static_cast<IUnknown*>(*list)->QueryInterface(IID_PPV_ARGS(&cl))))
+            PatchList(cl.Get()); // created closed; state starts at its first Reset
     }
     return hr;
 }
@@ -124,28 +181,7 @@ void STDMETHODCALLTYPE Device_CreateDepthStencilView(ID3D12Device* self, ID3D12R
 void CopyTracked(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src, UINT count, UINT increment)
 {
     for (UINT i = 0; i < count; ++i)
-    {
-        D3D12_CPU_DESCRIPTOR_HANDLE s = { src.ptr + SIZE_T(i) * increment };
-        D3D12_CPU_DESCRIPTOR_HANDLE d = { dst.ptr + SIZE_T(i) * increment };
-        track::ViewInfo info;
-        if (!track::Descriptors().Lookup(s, &info))
-            continue;
-        if (info.kind == track::ViewInfo::Kind::RTV)
-        {
-            D3D12_RENDER_TARGET_VIEW_DESC rd = {};
-            rd.Format = info.viewFormat;
-            rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-            track::Descriptors().OnCreateRTV(info.resource, &rd, d);
-        }
-        else if (info.kind == track::ViewInfo::Kind::DSV)
-        {
-            D3D12_DEPTH_STENCIL_VIEW_DESC dd = {};
-            dd.Format = info.viewFormat;
-            dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-            dd.Flags = info.dsvFlags;
-            track::Descriptors().OnCreateDSV(info.resource, &dd, d);
-        }
-    }
+        track::Descriptors().Copy({ dst.ptr + SIZE_T(i) * increment }, { src.ptr + SIZE_T(i) * increment });
 }
 
 UINT IncrementFor(D3D12_DESCRIPTOR_HEAP_TYPE type)
@@ -494,30 +530,29 @@ void STDMETHODCALLTYPE Queue_ExecuteCommandLists(ID3D12CommandQueue* self, UINT 
     const bool track = !HookBypass::Active() && count > 0 && lists != nullptr;
     if (track)
     {
+        // Lists whose vtable we have not seen (debug layer, runtime bypass, other classes) are
+        // patched now; they are tracked from their next Reset on (see ListState::sawReset).
         for (UINT i = 0; i < count; ++i)
-        {
-            // Lists whose vtable we have not seen (debug layer, runtime bypass, other classes) are
-            // patched now; they are tracked from their next recording on.
-            // Only graphics/compute lists implement ID3D12GraphicsCommandList; video and copy lists
-            // have different vtable layouts and must never be patched with these slots.
-            if (lists[i] == nullptr || g_list.IsKnownFast(lists[i]))
-                continue;
-            const D3D12_COMMAND_LIST_TYPE type = lists[i]->GetType();
-            if (type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE)
-                g_list.Patch(lists[i]);
-        }
+            PatchList(lists[i]);
         track::Analyzer().OnExecute(self, count, lists);
 
-        // RTSky's trace in one of these lists reads a TLAS clone written by a list submitted on
-        // another queue: order this submission after the producer's (already signalled) fence.
         for (UINT i = 0; i < count; ++i)
         {
             const ListState* s = track::FindListState(lists[i]);
-            if (s == nullptr || !s->tlasConsumedValid)
+            if (s == nullptr)
                 continue;
+            if (s->injectedComposite)
+                track::Tlas().NoteConsumerQueue(self);
+            if (!s->tlasConsumedValid)
+                continue;
+            // The trace reads a clone whose producer was submitted on another queue and has not
+            // completed. Only possible when the composite moved to a different queue since the clone
+            // was chosen (normally a clone is either from this queue or already complete): order this
+            // submission after the producer's (already signalled) fence.
             const track::TlasInfo& t = s->tlasConsumed;
-            if (t.producerQueue != nullptr && t.producerQueue != self && t.producerFence)
+            if (t.producerQueue != nullptr && t.producerQueue != self && !track::TlasTracker::ProducerDone(t))
             {
+                RTSKY_LOG_ONCE(log::Level::Warning, "Composite list moved to another queue; inserting a queue wait for the TLAS clone");
                 HookBypass bypass;
                 self->Wait(t.producerFence.Get(), t.producerFenceValue);
             }
@@ -595,6 +630,11 @@ void RegisterHooks()
 bool PatchFromDevice(ID3D12Device* device)
 {
     AcquireSRWLockExclusive(&g_installLock);
+    if (g_installFailed.load())
+    {
+        ReleaseSRWLockExclusive(&g_installLock);
+        return false;
+    }
     if (g_installed.load())
     {
         // Another device (e.g. created by an overlay) - its classes are the same; just make sure.
@@ -644,12 +684,24 @@ bool PatchFromDevice(ID3D12Device* device)
         ok &= g_queue.Patch(queue.Get());
         ok &= g_list.Patch(directList.Get());
         ok &= g_list.Patch(computeList.Get());
-        directList->Close();
-        computeList->Close();
     }
+    if (directList)
+        directList->Close();
+    if (computeList)
+        computeList->Close();
 
     if (ok)
+    {
         g_installed.store(true);
+    }
+    else
+    {
+        // Leave nothing half-installed: hooks without a complete set would track lists partially.
+        g_list.Unpatch();
+        g_queue.Unpatch();
+        g_device.Unpatch();
+        g_installFailed.store(true);
+    }
     ReleaseSRWLockExclusive(&g_installLock);
     if (ok)
         LOG_INFO("D3D12 hooks installed (device %p)", static_cast<void*>(device));

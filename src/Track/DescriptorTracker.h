@@ -35,6 +35,10 @@ public:
     // Returns false if the handle is unknown.
     bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE handle, ViewInfo* out) const;
 
+    // CopyDescriptors: the destination takes the source's view information unchanged (no resource
+    // is dereferenced - it may be gone), or forgets what it held when the source is untracked.
+    void Copy(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src);
+
     size_t Size() const;
 
 private:

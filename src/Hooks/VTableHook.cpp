@@ -15,16 +15,62 @@ void VTableHook::AddHook(uint32_t slot, void* hookFunction)
     m_hooks.emplace_back(slot, hookFunction);
 }
 
+// True if `code` lies in the D3D12 runtime or a GPU driver's user-mode D3D12 driver. Only such
+// pointers may be adopted as "original" when a slot changed under us: a third-party hook (overlay,
+// capture tool) that was installed on top of RTSky saved RTSky's hook as *its* original, so adopting
+// it would make the two call each other forever.
+static bool IsRuntimeOrDriverCode(void* code)
+{
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(code), &module) ||
+        module == nullptr)
+    {
+        return false;
+    }
+    wchar_t path[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameW(module, path, MAX_PATH);
+    if (n == 0)
+        return false;
+    const wchar_t* name = path;
+    for (const wchar_t* p = path; *p != 0; ++p)
+    {
+        if (*p == L'\\' || *p == L'/')
+            name = p + 1;
+    }
+    static const wchar_t* const kPrefixes[] = {
+        L"d3d12",     // d3d12.dll, D3D12Core.dll, d3d12SDKLayers.dll
+        L"nvwgf2um",  // NVIDIA user-mode driver
+        L"amdxc",     // AMD user-mode driver
+        L"igd12um",   // Intel user-mode driver
+        L"igdumd",
+    };
+    for (const wchar_t* prefix : kPrefixes)
+    {
+        if (_wcsnicmp(name, prefix, wcslen(prefix)) == 0)
+            return true;
+    }
+    return false;
+}
+
+// One lock for every hook instance: the device, list and queue vtables can share a page, and the
+// save / restore of the page protection is not atomic.
+static SRWLOCK g_writeLock = SRWLOCK_INIT;
+
 bool VTableHook::WriteSlot(void** vtable, uint32_t slot, void* value)
 {
+    // Vtables are data: never make their page executable.
+    AcquireSRWLockExclusive(&g_writeLock);
     DWORD oldProtect = 0;
-    if (!VirtualProtect(&vtable[slot], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect))
-        return false;
-    InterlockedExchangePointer(&vtable[slot], value);
-    DWORD ignored = 0;
-    VirtualProtect(&vtable[slot], sizeof(void*), oldProtect, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), &vtable[slot], sizeof(void*));
-    return true;
+    bool ok = VirtualProtect(&vtable[slot], sizeof(void*), PAGE_READWRITE, &oldProtect) != FALSE;
+    if (ok)
+    {
+        InterlockedExchangePointer(&vtable[slot], value);
+        DWORD ignored = 0;
+        VirtualProtect(&vtable[slot], sizeof(void*), oldProtect, &ignored);
+    }
+    ReleaseSRWLockExclusive(&g_writeLock);
+    return ok;
 }
 
 bool VTableHook::IsPatched(void* object) const
@@ -98,45 +144,46 @@ void* VTableHook::OriginalSlow(void** vtable, uint32_t slot) const
         if (m_tables[i].vtable == vtable)
             return m_tables[i].originals[slot];
     }
-    return nullptr;
+    return const_cast<VTableHook*>(this)->Adopt(vtable, slot);
 }
 
-// True if `code` lies in the D3D12 runtime or a GPU driver's user-mode D3D12 driver. Only such
-// pointers may be adopted as "original" when a slot changed under us: a third-party hook (overlay,
-// capture tool) that was installed on top of RTSky saved RTSky's hook as *its* original, so adopting
-// it would make the two call each other forever.
-static bool IsRuntimeOrDriverCode(void* code)
+void* VTableHook::Adopt(void** vtable, uint32_t slot)
 {
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            static_cast<LPCWSTR>(code), &module) ||
-        module == nullptr)
+    AcquireSRWLockExclusive(&m_lock);
+    const uint32_t count = m_tableCount.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < count; ++i)
     {
-        return false;
+        if (m_tables[i].vtable == vtable)
+        {
+            void* found = m_tables[i].originals[slot];
+            ReleaseSRWLockExclusive(&m_lock);
+            return found;
+        }
     }
-    wchar_t path[MAX_PATH] = {};
-    const DWORD n = GetModuleFileNameW(module, path, MAX_PATH);
-    if (n == 0)
-        return false;
-    const wchar_t* name = path;
-    for (const wchar_t* p = path; *p != 0; ++p)
+    // Fallback: the first table's original (same interface, normally the same class).
+    void* result = count > 0 ? m_tables[0].originals[slot] : nullptr;
+    if (count > 0 && count < kMaxTables)
     {
-        if (*p == L'\\' || *p == L'/')
-            name = p + 1;
+        Table& table = m_tables[count];
+        table.vtable = vtable;
+        for (const auto& [s, hook] : m_hooks)
+        {
+            void* current = vtable[s];
+            // Runtime / driver code is this class's own implementation. Anything else is either our
+            // hook (copied) or a third-party function that may call back into us: never adopt that.
+            const bool implementation = current != hook && IsRuntimeOrDriverCode(current);
+            table.originals[s] = implementation ? current : m_tables[0].originals[s];
+            table.chained[s] = current != hook && !implementation;
+        }
+        m_tableCount.store(count + 1, std::memory_order_release);
+        result = table.originals[slot];
+        ReleaseSRWLockExclusive(&m_lock);
+        LOG_INFO("%s: adopted copied vtable %p", m_name, static_cast<void*>(vtable));
+        return result;
     }
-    static const wchar_t* const kPrefixes[] = {
-        L"d3d12",     // d3d12.dll, D3D12Core.dll, d3d12SDKLayers.dll
-        L"nvwgf2um",  // NVIDIA user-mode driver
-        L"amdxc",     // AMD user-mode driver
-        L"igd12um",   // Intel user-mode driver
-        L"igdumd",
-    };
-    for (const wchar_t* prefix : kPrefixes)
-    {
-        if (_wcsnicmp(name, prefix, wcslen(prefix)) == 0)
-            return true;
-    }
-    return false;
+    ReleaseSRWLockExclusive(&m_lock);
+    RTSKY_LOG_ONCE(log::Level::Error, "%s: hook entered through an unknown vtable and no table is free", m_name);
+    return result;
 }
 
 void VTableHook::Verify()

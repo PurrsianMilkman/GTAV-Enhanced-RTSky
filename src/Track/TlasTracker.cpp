@@ -148,14 +148,29 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
 
     if (m_cloneEnabled)
     {
+        bool cloned = false;
         ComPtr<ID3D12Device5> device;
-        if (SUCCEEDED(list->GetDevice(IID_PPV_ARGS(&device))))
+        if (m_sceneBuilds >= m_allocRetryAt && SUCCEEDED(list->GetDevice(IID_PPV_ARGS(&device))))
         {
+            if (device.Get() != m_device)
+            {
+                // A different device (recreated after a device removal): the ring belongs to the old one.
+                for (uint32_t i = 0; i < kCloneRing; ++i)
+                {
+                    m_clones[i].Reset();
+                    m_cloneHolders[i].reset();
+                    m_cloneSizes[i] = 0;
+                }
+                m_latest = TlasInfo{};
+                m_completed = TlasInfo{};
+                m_device = device.Get();
+            }
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild = {};
             device->GetRaytracingAccelerationStructurePrebuildInfo(&desc->Inputs, &prebuild);
             const int slot = prebuild.ResultDataMaxSizeInBytes > 0 ? AcquireCloneSlot(device.Get(), prebuild.ResultDataMaxSizeInBytes) : -1;
             if (slot >= 0)
             {
+                cloned = true;
                 // build -> (UAV barrier) -> clone -> (UAV barrier): the game may rebuild or update the
                 // same destination later in this list, which must not overlap our read.
                 D3D12_RESOURCE_BARRIER uav = {};
@@ -170,6 +185,19 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
                 info.address = cloneAddress;
                 info.cloneHolder = m_cloneHolders[slot];
             }
+            else
+            {
+                // Out of memory (or no size): back off for ~2 s of scene builds instead of retrying
+                // a large allocation every frame.
+                m_allocRetryAt = m_sceneBuilds + 120;
+            }
+        }
+        if (!cloned)
+        {
+            // Never fall back to the game's own TLAS memory: it may be rebuilt or reallocated while
+            // RTSky's trace reads it. No clone -> no trace this frame.
+            ReleaseSRWLockExclusive(&m_lock);
+            return;
         }
     }
 
@@ -185,6 +213,8 @@ void TlasTracker::Publish(const TlasInfo& produced, ID3D12CommandQueue* queue, I
     // Lists can be submitted out of recording order: never go back to an older build.
     if (produced.buildSerial >= m_latest.buildSerial)
     {
+        if (m_latest.address != 0 && ProducerDone(m_latest))
+            m_completed = m_latest;
         m_latest = produced;
         m_latest.producerQueue = queue;
         m_latest.producerFence = fence;
@@ -193,14 +223,44 @@ void TlasTracker::Publish(const TlasInfo& produced, ID3D12CommandQueue* queue, I
     ReleaseSRWLockExclusive(&m_lock);
 }
 
-bool TlasTracker::GetSceneTlas(TlasInfo* out) const
+bool TlasTracker::ProducerDone(const TlasInfo& info)
 {
-    AcquireSRWLockShared(&m_lock);
-    bool ok = m_latest.address != 0;
-    if (ok)
-        *out = m_latest;
-    ReleaseSRWLockShared(&m_lock);
+    // UINT64_MAX: device removed, nothing is running any more.
+    return !info.producerFence || info.producerFence->GetCompletedValue() >= info.producerFenceValue;
+}
+
+bool TlasTracker::GetSceneTlas(TlasInfo* out)
+{
+    AcquireSRWLockExclusive(&m_lock);
+    bool ok = false;
+    if (m_latest.address != 0)
+    {
+        const bool done = ProducerDone(m_latest);
+        if (done)
+            m_completed = m_latest;
+        // A clone still being produced is only safe on the queue that will run the consumer (same
+        // queue = submission order). Waiting on another queue's fence could deadlock with the
+        // game's own cross-queue waits, so otherwise the newest COMPLETED clone is used.
+        if (done || (m_latest.producerQueue != nullptr && m_latest.producerQueue == m_consumerQueue))
+        {
+            *out = m_latest;
+            ok = true;
+        }
+    }
+    if (!ok && m_completed.address != 0)
+    {
+        *out = m_completed;
+        ok = true;
+    }
+    ReleaseSRWLockExclusive(&m_lock);
     return ok;
+}
+
+void TlasTracker::NoteConsumerQueue(ID3D12CommandQueue* queue)
+{
+    AcquireSRWLockExclusive(&m_lock);
+    m_consumerQueue = queue;
+    ReleaseSRWLockExclusive(&m_lock);
 }
 
 uint64_t TlasTracker::TopLevelBuilds() const
@@ -213,8 +273,10 @@ uint64_t TlasTracker::TopLevelBuilds() const
 
 TlasTracker& Tlas()
 {
-    static TlasTracker instance;
-    return instance;
+    // Never destroyed: hooks and GPU-lifetime deleters may still run during process exit, after
+    // static destructors (destruction order across translation units is unspecified).
+    static TlasTracker* instance = new TlasTracker();
+    return *instance;
 }
 
 } // namespace rtsky::track
