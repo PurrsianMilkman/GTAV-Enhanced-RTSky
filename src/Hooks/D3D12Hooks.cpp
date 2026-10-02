@@ -8,10 +8,13 @@
 #include "../Common/Log.h"
 #include "../Common/D3D12Compat.h"
 #include "../Render/GpuLifetime.h"
+#include "../Render/InputCensus.h"
 #include "../Render/Renderer.h"
+#include "../Track/BufferTracker.h"
 #include "../Track/CommandListTracker.h"
 #include "../Track/DescriptorTracker.h"
 #include "../Track/FrameAnalyzer.h"
+#include "../Track/RootSignatureTracker.h"
 #include "../Track/ShaderCapture.h"
 #include "../Track/TlasTracker.h"
 
@@ -33,12 +36,16 @@ VTableHook g_device("ID3D12Device");
 VTableHook g_list("ID3D12GraphicsCommandList");
 VTableHook g_queue("ID3D12CommandQueue");
 VTableHook g_library("ID3D12PipelineLibrary");
+// ID3D12Device10 resource-creation methods: a separate table, patched only on devices implementing it
+// (writing those slots into an older device's vtable would run past its end).
+VTableHook g_device10("ID3D12Device10");
 
 std::atomic<bool> g_installed{ false };
 std::atomic<bool> g_installFailed{ false };
 SRWLOCK g_installLock = SRWLOCK_INIT;
 UINT g_rtvIncrement = 0;
 UINT g_dsvIncrement = 0;
+UINT g_cbvSrvUavIncrement = 0;
 
 using PFN_CreateDevice = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
 PFN_CreateDevice g_origCreateDevice = nullptr;
@@ -229,7 +236,7 @@ HRESULT STDMETHODCALLTYPE Device_CreateGraphicsPipelineState(ID3D12Device* self,
     HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateGraphicsPipelineState, self, desc, riid, pso);
     ComPtr<ID3D12PipelineState> p;
     if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
-        track::NotePipeline(p.Get(), desc->PS);
+        track::NotePipeline(p.Get(), desc->PS, desc->pRootSignature);
     return hr;
 }
 
@@ -251,7 +258,7 @@ HRESULT STDMETHODCALLTYPE Library_LoadGraphicsPipeline(ID3D12PipelineLibrary* se
     HRESULT hr = Orig<Fn>(g_library, RTSKY_IDX_Library_LoadGraphicsPipeline, self, name, desc, riid, pso);
     ComPtr<ID3D12PipelineState> p;
     if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
-        track::NotePipeline(p.Get(), desc->PS);
+        track::NotePipeline(p.Get(), desc->PS, desc->pRootSignature);
     return hr;
 }
 
@@ -289,6 +296,148 @@ HRESULT STDMETHODCALLTYPE Device_CreatePipelineLibrary(ID3D12Device* self, const
     return hr;
 }
 
+// Root signatures, constant-buffer / unordered-access views and buffers: recorded so that a game
+// pass's inputs (registers -> root parameters -> descriptors / addresses -> resources) can be named
+// at its draw (Renderer's input census). The hooks only record.
+HRESULT STDMETHODCALLTYPE Device_CreateRootSignature(ID3D12Device* self, UINT nodeMask, const void* blob, SIZE_T length, REFIID riid,
+                                                     void** rs)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const void*, SIZE_T, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateRootSignature, self, nodeMask, blob, length, riid, rs);
+    if (SUCCEEDED(hr) && rs != nullptr && *rs != nullptr && !HookBypass::Active())
+    {
+        ComPtr<ID3D12RootSignature> r;
+        if (SUCCEEDED(static_cast<IUnknown*>(*rs)->QueryInterface(IID_PPV_ARGS(&r))))
+            track::NoteRootSignature(r.Get(), blob, length);
+    }
+    return hr;
+}
+
+void STDMETHODCALLTYPE Device_CreateConstantBufferView(ID3D12Device* self, const D3D12_CONSTANT_BUFFER_VIEW_DESC* desc,
+                                                       D3D12_CPU_DESCRIPTOR_HANDLE handle)
+{
+    if (!HookBypass::Active())
+        track::Descriptors().OnCreateCBV(desc, handle);
+    using Fn = void(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_CONSTANT_BUFFER_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+    Orig<Fn>(g_device, RTSKY_IDX_Device_CreateConstantBufferView, self, desc, handle);
+}
+
+void STDMETHODCALLTYPE Device_CreateUnorderedAccessView(ID3D12Device* self, ID3D12Resource* resource, ID3D12Resource* counter,
+                                                        const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE handle)
+{
+    if (!HookBypass::Active() && track::Descriptors().TrackShaderViews())
+        track::Descriptors().Forget(handle);
+    using Fn = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, ID3D12Resource*, const D3D12_UNORDERED_ACCESS_VIEW_DESC*,
+                                        D3D12_CPU_DESCRIPTOR_HANDLE);
+    Orig<Fn>(g_device, RTSKY_IDX_Device_CreateUnorderedAccessView, self, resource, counter, desc, handle);
+}
+
+// Buffers only (the callers check the dimension first: textures are never recorded).
+void NoteCreatedBuffer(void** object, D3D12_HEAP_TYPE heapType, D3D12_CPU_PAGE_PROPERTY cpuPage)
+{
+    ComPtr<ID3D12Resource> r;
+    if (object != nullptr && *object != nullptr && SUCCEEDED(static_cast<IUnknown*>(*object)->QueryInterface(IID_PPV_ARGS(&r))))
+        track::NoteBuffer(r.Get(), heapType, cpuPage);
+}
+
+void NotePlacedBuffer(void** object, ID3D12Heap* heap)
+{
+    if (heap == nullptr)
+        return;
+    const D3D12_HEAP_DESC hd = HeapDesc(heap);
+    NoteCreatedBuffer(object, hd.Properties.Type, hd.Properties.CPUPageProperty);
+}
+
+HRESULT STDMETHODCALLTYPE Device_CreateCommittedResource(ID3D12Device* self, const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                         const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
+                                                         const D3D12_CLEAR_VALUE* clear, REFIID riid, void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC*,
+                                           D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateCommittedResource, self, heap, flags, desc, state, clear, riid, resource);
+    if (SUCCEEDED(hr) && heap != nullptr && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NoteCreatedBuffer(resource, heap->Type, heap->CPUPageProperty);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device_CreatePlacedResource(ID3D12Device* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC* desc,
+                                                      D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear, REFIID riid, void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+                                           const D3D12_CLEAR_VALUE*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreatePlacedResource, self, heap, offset, desc, state, clear, riid, resource);
+    if (SUCCEEDED(hr) && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NotePlacedBuffer(resource, heap);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device_CreateCommittedResource1(ID3D12Device* self, const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                          const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
+                                                          const D3D12_CLEAR_VALUE* clear, ID3D12ProtectedResourceSession* session, REFIID riid,
+                                                          void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC*,
+                                           D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateCommittedResource1, self, heap, flags, desc, state, clear, session, riid, resource);
+    if (SUCCEEDED(hr) && heap != nullptr && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NoteCreatedBuffer(resource, heap->Type, heap->CPUPageProperty);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device10_CreateCommittedResource2(ID3D12Device* self, const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                            const D3D12_RESOURCE_DESC1* desc, D3D12_RESOURCE_STATES state,
+                                                            const D3D12_CLEAR_VALUE* clear, ID3D12ProtectedResourceSession* session,
+                                                            REFIID riid, void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC1*,
+                                           D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device10, RTSKY_IDX_Device10_CreateCommittedResource2, self, heap, flags, desc, state, clear, session, riid,
+                          resource);
+    if (SUCCEEDED(hr) && heap != nullptr && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NoteCreatedBuffer(resource, heap->Type, heap->CPUPageProperty);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device10_CreatePlacedResource1(ID3D12Device* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC1* desc,
+                                                         D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear, REFIID riid,
+                                                         void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC1*, D3D12_RESOURCE_STATES,
+                                           const D3D12_CLEAR_VALUE*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device10, RTSKY_IDX_Device10_CreatePlacedResource1, self, heap, offset, desc, state, clear, riid, resource);
+    if (SUCCEEDED(hr) && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NotePlacedBuffer(resource, heap);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device10_CreateCommittedResource3(ID3D12Device* self, const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                            const D3D12_RESOURCE_DESC1* desc, D3D12_BARRIER_LAYOUT layout,
+                                                            const D3D12_CLEAR_VALUE* clear, ID3D12ProtectedResourceSession* session,
+                                                            UINT32 castableCount, const DXGI_FORMAT* castable, REFIID riid, void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC1*,
+                                           D3D12_BARRIER_LAYOUT, const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, UINT32,
+                                           const DXGI_FORMAT*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device10, RTSKY_IDX_Device10_CreateCommittedResource3, self, heap, flags, desc, layout, clear, session,
+                          castableCount, castable, riid, resource);
+    if (SUCCEEDED(hr) && heap != nullptr && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NoteCreatedBuffer(resource, heap->Type, heap->CPUPageProperty);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device10_CreatePlacedResource2(ID3D12Device* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC1* desc,
+                                                         D3D12_BARRIER_LAYOUT layout, const D3D12_CLEAR_VALUE* clear, UINT32 castableCount,
+                                                         const DXGI_FORMAT* castable, REFIID riid, void** resource)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC1*, D3D12_BARRIER_LAYOUT,
+                                           const D3D12_CLEAR_VALUE*, UINT32, const DXGI_FORMAT*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device10, RTSKY_IDX_Device10_CreatePlacedResource2, self, heap, offset, desc, layout, clear, castableCount, castable,
+                          riid, resource);
+    if (SUCCEEDED(hr) && desc != nullptr && desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && !HookBypass::Active())
+        NotePlacedBuffer(resource, heap);
+    return hr;
+}
+
 // Copies of RTV / DSV descriptors between heaps carry the tracked view information along.
 void CopyTracked(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src, UINT count, UINT increment)
 {
@@ -298,6 +447,8 @@ void CopyTracked(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE sr
 
 UINT IncrementFor(D3D12_DESCRIPTOR_HEAP_TYPE type)
 {
+    if (type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        return track::Descriptors().TrackShaderViews() ? g_cbvSrvUavIncrement : 0;
     return type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ? g_rtvIncrement : type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV ? g_dsvIncrement : 0;
 }
 
@@ -373,10 +524,20 @@ HRESULT STDMETHODCALLTYPE CL_Reset(CL* self, ID3D12CommandAllocator* allocator, 
     return hr;
 }
 
+// The first draw of the deferred lighting pass: the moment its inputs are bound (input census).
+inline void NoteLightingDraw(const ListState& s)
+{
+    if (s.psoPass == track::PassId::DirectionalStandard && s.bindingOpen && s.current.draws == 1)
+        render::OnLightingDraw(s);
+}
+
 void STDMETHODCALLTYPE CL_DrawInstanced(CL* self, UINT a, UINT b, UINT c, UINT d)
 {
     if (ListState* s = Track(self))
+    {
         track::OnDraw(*s);
+        NoteLightingDraw(*s);
+    }
     using Fn = void(STDMETHODCALLTYPE*)(CL*, UINT, UINT, UINT, UINT);
     Orig<Fn>(g_list, RTSKY_IDX_CL_DrawInstanced, self, a, b, c, d);
 }
@@ -384,7 +545,10 @@ void STDMETHODCALLTYPE CL_DrawInstanced(CL* self, UINT a, UINT b, UINT c, UINT d
 void STDMETHODCALLTYPE CL_DrawIndexedInstanced(CL* self, UINT a, UINT b, UINT c, INT d, UINT e)
 {
     if (ListState* s = Track(self))
+    {
         track::OnDraw(*s);
+        NoteLightingDraw(*s);
+    }
     using Fn = void(STDMETHODCALLTYPE*)(CL*, UINT, UINT, UINT, INT, UINT);
     Orig<Fn>(g_list, RTSKY_IDX_CL_DrawIndexedInstanced, self, a, b, c, d, e);
 }
@@ -411,11 +575,7 @@ void STDMETHODCALLTYPE CL_RSSetViewports(CL* self, UINT count, const D3D12_VIEWP
 void STDMETHODCALLTYPE CL_SetPipelineState(CL* self, ID3D12PipelineState* pso)
 {
     if (ListState* s = Track(self))
-    {
-        s->pipelineKind = ListState::PipelineKind::Pso;
-        s->pso = pso;
-        s->stateObject = nullptr;
-    }
+        track::OnSetPipelineState(*s, pso);
     using Fn = void(STDMETHODCALLTYPE*)(CL*, ID3D12PipelineState*);
     Orig<Fn>(g_list, RTSKY_IDX_CL_SetPipelineState, self, pso);
 }
@@ -423,11 +583,7 @@ void STDMETHODCALLTYPE CL_SetPipelineState(CL* self, ID3D12PipelineState* pso)
 void STDMETHODCALLTYPE CL_SetPipelineState1(CL* self, ID3D12StateObject* stateObject)
 {
     if (ListState* s = Track(self))
-    {
-        s->pipelineKind = ListState::PipelineKind::StateObject;
-        s->stateObject = stateObject;
-        s->pso = nullptr;
-    }
+        track::OnSetStateObject(*s, stateObject);
     using Fn = void(STDMETHODCALLTYPE*)(CL*, ID3D12StateObject*);
     Orig<Fn>(g_list, RTSKY_IDX_CL_SetPipelineState1, self, stateObject);
 }
@@ -719,6 +875,16 @@ void RegisterHooks()
     g_device.AddHook(RTSKY_IDX_Device_CreateGraphicsPipelineState, reinterpret_cast<void*>(&Device_CreateGraphicsPipelineState));
     g_device.AddHook(RTSKY_IDX_Device_CreatePipelineState, reinterpret_cast<void*>(&Device_CreatePipelineState));
     g_device.AddHook(RTSKY_IDX_Device_CreatePipelineLibrary, reinterpret_cast<void*>(&Device_CreatePipelineLibrary));
+    g_device.AddHook(RTSKY_IDX_Device_CreateRootSignature, reinterpret_cast<void*>(&Device_CreateRootSignature));
+    g_device.AddHook(RTSKY_IDX_Device_CreateConstantBufferView, reinterpret_cast<void*>(&Device_CreateConstantBufferView));
+    g_device.AddHook(RTSKY_IDX_Device_CreateUnorderedAccessView, reinterpret_cast<void*>(&Device_CreateUnorderedAccessView));
+    g_device.AddHook(RTSKY_IDX_Device_CreateCommittedResource, reinterpret_cast<void*>(&Device_CreateCommittedResource));
+    g_device.AddHook(RTSKY_IDX_Device_CreatePlacedResource, reinterpret_cast<void*>(&Device_CreatePlacedResource));
+    g_device.AddHook(RTSKY_IDX_Device_CreateCommittedResource1, reinterpret_cast<void*>(&Device_CreateCommittedResource1));
+    g_device10.AddHook(RTSKY_IDX_Device10_CreateCommittedResource2, reinterpret_cast<void*>(&Device10_CreateCommittedResource2));
+    g_device10.AddHook(RTSKY_IDX_Device10_CreatePlacedResource1, reinterpret_cast<void*>(&Device10_CreatePlacedResource1));
+    g_device10.AddHook(RTSKY_IDX_Device10_CreateCommittedResource3, reinterpret_cast<void*>(&Device10_CreateCommittedResource3));
+    g_device10.AddHook(RTSKY_IDX_Device10_CreatePlacedResource2, reinterpret_cast<void*>(&Device10_CreatePlacedResource2));
 
 #define RTSKY_HOOK(Name) g_list.AddHook(RTSKY_IDX_CL_##Name, reinterpret_cast<void*>(&CL_##Name))
     RTSKY_HOOK(Close);
@@ -760,6 +926,15 @@ void RegisterHooks()
     g_library.AddHook(RTSKY_IDX_Library_LoadPipeline, reinterpret_cast<void*>(&Library_LoadPipeline));
 }
 
+// The ID3D12Device10 resource-creation hooks, on devices that implement it on the same pointer.
+void PatchDevice10(ID3D12Device* device)
+{
+    ComPtr<ID3D12Device10> d10;
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&d10))) && static_cast<void*>(d10.Get()) == static_cast<void*>(device) &&
+        !g_device10.IsKnownFast(device))
+        g_device10.Patch(device);
+}
+
 // Patches the device, queue and command list vtables using objects created on `device`.
 bool PatchFromDevice(ID3D12Device* device)
 {
@@ -773,6 +948,7 @@ bool PatchFromDevice(ID3D12Device* device)
     {
         // Another device (e.g. created by an overlay) - its classes are the same; just make sure.
         g_device.Patch(device);
+        PatchDevice10(device);
         ReleaseSRWLockExclusive(&g_installLock);
         return true;
     }
@@ -787,12 +963,15 @@ bool PatchFromDevice(ID3D12Device* device)
     HookBypass bypass;
     g_rtvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     g_dsvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    g_cbvSrvUavIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     // A permanent failure (old runtime, unwritable vtable) disables RTSky for the session; anything
     // else (a device on another adapter that cannot create queues, out of memory) is retried with
     // the next device - the device hooks stay installed and are inert until then.
     bool permanent = false;
     bool ok = g_device.Patch(device);
+    if (ok)
+        PatchDevice10(device);
     permanent = !ok;
 
     D3D12_COMMAND_QUEUE_DESC qd = {};
@@ -851,6 +1030,7 @@ bool PatchFromDevice(ID3D12Device* device)
         g_queue.Unpatch();
         g_library.Unpatch();
         g_device.Unpatch();
+        g_device10.Unpatch();
         g_installFailed.store(true);
     }
     ReleaseSRWLockExclusive(&g_installLock);
@@ -1000,6 +1180,7 @@ void VerifyHooks()
     if (!g_installed.load())
         return;
     g_device.Verify();
+    g_device10.Verify();
     g_list.Verify();
     g_queue.Verify();
     g_library.Verify();
@@ -1011,6 +1192,7 @@ void Uninstall()
     g_queue.Unpatch();
     g_library.Unpatch();
     g_device.Unpatch();
+    g_device10.Unpatch();
     if (g_createDeviceTarget != nullptr)
         MH_DisableHook(g_createDeviceTarget);
     MH_Uninitialize();

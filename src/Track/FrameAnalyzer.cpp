@@ -7,6 +7,15 @@
 #include <string>
 #include <map>
 
+// Tick source. The Windows host tests substitute a fake clock (RTSKY_TEST_CLOCK, tests/AnalyzerTests.cpp);
+// on Linux the test shim's windows.h provides it.
+#ifdef RTSKY_TEST_CLOCK
+extern "C" unsigned long long RTSkyTestTickCount64();
+#define RTSKY_TICK() RTSkyTestTickCount64()
+#else
+#define RTSKY_TICK() GetTickCount64()
+#endif
+
 namespace rtsky::track {
 namespace {
 
@@ -61,6 +70,16 @@ bool PrepareRuleMatches(const InjectionRules& rules, const BindingRecord& r)
     if (rules.gbufferEvery)
         return !r.dsvReadOnlyDepth;
     return rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore;
+}
+
+// The Composite rule without the armed check: by pass name when armed that way, else by ordinal.
+bool CompositeRuleMatches(const InjectionRules& rules, const BindingRecord& r)
+{
+    if (r.hdrOrdinal < 0 || !rules.hdr.Matches(r))
+        return false;
+    if (rules.compositeByName)
+        return r.firstPassId == rules.compositePass;
+    return r.hdrOrdinal == rules.hdrOrdinal && (rules.hdrMrtBefore < 0 || static_cast<int32_t>(r.mrtBefore) == rules.hdrMrtBefore);
 }
 
 thread_local uint64_t t_rulesGeneration = UINT64_MAX;
@@ -149,11 +168,11 @@ std::string BindingSignature::ToString() const
 // -------------------------------------------------------------------------------------------------
 // FrameAnalyzer
 // -------------------------------------------------------------------------------------------------
-void FrameAnalyzer::Configure(int compositeCandidate, int gbufferOrdinal, int compositeOrdinal, int stableFrames)
+void FrameAnalyzer::Configure(int compositeCandidate, int gbufferOrdinal, int compositeOrdinal, int stableFrames, PassId compositePass)
 {
     AcquireSRWLockExclusive(&m_lock);
     if (compositeCandidate != m_compositeCandidate || gbufferOrdinal != m_gbufferOrdinalOverride ||
-        compositeOrdinal != m_compositeOrdinalOverride)
+        compositeOrdinal != m_compositeOrdinalOverride || compositePass != m_compositePass)
     {
         m_stableCount = 0;
     }
@@ -161,6 +180,7 @@ void FrameAnalyzer::Configure(int compositeCandidate, int gbufferOrdinal, int co
     m_gbufferOrdinalOverride = gbufferOrdinal;
     m_compositeOrdinalOverride = compositeOrdinal;
     m_stableFrames = stableFrames < 1 ? 1 : stableFrames;
+    m_compositePass = compositePass;
     ReleaseSRWLockExclusive(&m_lock);
 }
 
@@ -213,7 +233,7 @@ void FrameAnalyzer::OnExecute(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
         s->log.clear(); // a list executed twice without re-recording contributes once
     }
 
-    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG now = RTSKY_TICK();
     if (m_window.size() >= 64 && now - m_lastAnalysis >= 100)
     {
         m_lastAnalysis = now;
@@ -414,8 +434,34 @@ void FrameAnalyzer::Analyze(bool forceDump)
             if (isHdr(m_window[i]))
                 candidates.push_back(&m_window[i]);
         }
+        auto countIn = [&](auto&& pred) {
+            int n = 0;
+            for (size_t i = frameBegin; i < frameEnd; ++i)
+                n += pred(m_window[i]) ? 1 : 0;
+            return n;
+        };
         const BindingRecord* h = nullptr;
-        if (m_compositeOrdinalOverride >= 0)
+        // Named rule (preferred whenever this frame's pipelines carry names): the binding after the
+        // G-buffer phase whose first draw uses the configured pass (PS_directional_standard, the deferred
+        // lighting that writes the scene colour). Formats and ordinals only pick a pass when names are
+        // unavailable, or when CompositeOrdinal pins one.
+        bool hNamed = false;
+        int namedCount = 0;
+        if (m_compositePass != PassId::Unknown && m_compositeOrdinalOverride < 0 &&
+            countIn([&](const BindingRecord& r) { return r.passMask != 0; }) > 0)
+        {
+            hNamed = true;
+            namedCount = countIn([&](const BindingRecord& r) { return r.firstPassId == m_compositePass; });
+            for (const BindingRecord* c : candidates)
+            {
+                if (c->firstPassId == m_compositePass)
+                {
+                    h = c;
+                    break;
+                }
+            }
+        }
+        else if (m_compositeOrdinalOverride >= 0)
         {
             for (const BindingRecord* c : candidates)
             {
@@ -430,6 +476,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
         {
             h = candidates[m_compositeCandidate];
         }
+        m_namedPassMissing = hNamed && h == nullptr;
         if (g == nullptr || h == nullptr)
         {
             ++framesWithoutHdr;
@@ -439,12 +486,6 @@ void FrameAnalyzer::Analyze(bool forceDump)
 
         const BindingSignature gSig = BindingSignature::From(*g);
         const BindingSignature hSig = BindingSignature::From(*h);
-        auto countIn = [&](auto&& pred) {
-            int n = 0;
-            for (size_t i = frameBegin; i < frameEnd; ++i)
-                n += pred(m_window[i]) ? 1 : 0;
-            return n;
-        };
         int32_t gDisc = -1;
         const int gCount = countIn([&](const BindingRecord& r) { return r.mrtOrdinal == g->mrtOrdinal && gSig.Matches(r); });
         int gDiscCount = 0;
@@ -476,9 +517,14 @@ void FrameAnalyzer::Analyze(bool forceDump)
             }
         }
         int32_t hDisc = -1;
-        const int hCount = countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); });
+        // Named: unique when the pass is the first pipeline of exactly one binding per frame.
+        const int hCount = hNamed ? namedCount : countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); });
         int hDiscCount = 0;
-        if (hCount != 1)
+        if (hNamed && hCount != 1)
+        {
+            hDisc = -2;
+        }
+        else if (!hNamed && hCount != 1)
         {
             hDisc = static_cast<int32_t>(h->mrtBefore);
             hDiscCount = countIn([&](const BindingRecord& r) {
@@ -497,7 +543,10 @@ void FrameAnalyzer::Analyze(bool forceDump)
             if (gDisc == -2)
                 m_ambiguity = "G-buffer mrt#" + std::to_string(g->mrtOrdinal) + " x" + std::to_string(gCount) + " per frame (x" +
                               std::to_string(gDiscCount) + " after " + std::to_string(g->hdrBefore) + " hdr in its list)";
-            if (hDisc == -2)
+            if (hDisc == -2 && hNamed)
+                m_ambiguity += std::string(m_ambiguity.empty() ? "" : "; ") + PassName(m_compositePass) + " x" + std::to_string(hCount) +
+                               " per frame";
+            else if (hDisc == -2)
                 m_ambiguity += std::string(m_ambiguity.empty() ? "" : "; ") + "HDR hdr#" + std::to_string(h->hdrOrdinal) + " " +
                                hSig.ToString() + " x" + std::to_string(hCount) + " per frame (x" + std::to_string(hDiscCount) +
                                " after " + std::to_string(h->mrtBefore) + " mrt in its list)";
@@ -505,7 +554,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
         }
 
         if (gSig == m_candGbuffer && g->mrtOrdinal == m_candGbufferOrdinal && gDisc == m_candGbufferDisc &&
-            gEvery == m_candGbufferEvery && hSig == m_candHdr && h->hdrOrdinal == m_candHdrOrdinal && hDisc == m_candHdrDisc)
+            gEvery == m_candGbufferEvery && hSig == m_candHdr && h->hdrOrdinal == m_candHdrOrdinal && hDisc == m_candHdrDisc &&
+            hNamed == m_candHdrNamed)
         {
             ++m_stableCount;
         }
@@ -518,6 +568,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_candHdr = hSig;
             m_candHdrOrdinal = h->hdrOrdinal;
             m_candHdrDisc = hDisc;
+            m_candHdrNamed = hNamed;
             m_stableCount = 1;
         }
     }
@@ -528,6 +579,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
                        m_rules.gbufferHdrBefore != m_candGbufferDisc || m_rules.gbufferEvery != m_candGbufferEvery ||
                        !(m_rules.hdr == m_candHdr) ||
                        m_rules.hdrOrdinal != m_candHdrOrdinal || m_rules.hdrMrtBefore != m_candHdrDisc ||
+                       m_rules.compositeByName != m_candHdrNamed || (m_candHdrNamed && m_rules.compositePass != m_compositePass) ||
                        m_rules.depthClearKnown != clearKnown || (clearKnown && m_rules.depthClearValue != clearValue);
         if (changed)
         {
@@ -539,15 +591,23 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_rules.hdr = m_candHdr;
             m_rules.hdrOrdinal = m_candHdrOrdinal;
             m_rules.hdrMrtBefore = m_candHdrDisc;
+            m_rules.compositeByName = m_candHdrNamed;
+            m_rules.compositePass = m_candHdrNamed ? m_compositePass : PassId::Unknown;
             m_rules.depthClearKnown = clearKnown;
             m_rules.depthClearValue = clearValue;
             m_rules.generation = m_generation.load() + 1;
             m_generation.store(m_rules.generation, std::memory_order_release);
-            LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (list ordinal %d%s), depth clear %s%.1f",
-                     m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal,
-                     m_rules.gbufferEvery ? ", every parallel list" : m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
-                     m_rules.hdr.ToString().c_str(), m_rules.hdrOrdinal, m_rules.hdrMrtBefore >= 0 ? ", discriminated" : "",
-                     clearKnown ? "" : "unknown ", clearValue);
+            if (m_rules.compositeByName)
+                LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (named %s), depth clear %s%.1f",
+                         m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal,
+                         m_rules.gbufferEvery ? ", every parallel list" : m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
+                         m_rules.hdr.ToString().c_str(), PassName(m_rules.compositePass), clearKnown ? "" : "unknown ", clearValue);
+            else
+                LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (list ordinal %d%s), depth clear %s%.1f",
+                         m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal,
+                         m_rules.gbufferEvery ? ", every parallel list" : m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
+                         m_rules.hdr.ToString().c_str(), m_rules.hdrOrdinal, m_rules.hdrMrtBefore >= 0 ? ", discriminated" : "",
+                         clearKnown ? "" : "unknown ", clearValue);
         }
         m_status = "armed";
     }
@@ -567,6 +627,9 @@ void FrameAnalyzer::Analyze(bool forceDump)
         if (ambiguousFrames > 0)
             m_status = "G-buffer " + best->sig.ToString() + ": not unique per frame - " + m_ambiguity +
                        (m_autoDumpDone ? " (frame dump written, see docs/CALIBRATION.md)" : " (see docs/CALIBRATION.md)");
+        else if (m_namedPassMissing)
+            m_status = "G-buffer " + best->sig.ToString() + ", " + PassName(m_compositePass) +
+                       " not drawn after it (menu / loading? or set CompositePass)";
         else
             m_status = "G-buffer " + best->sig.ToString() + ", HDR pass " +
                        (m_stableCount > 0 ? "found, stabilising (if this persists, pin GBufferOrdinal from the frame dump)"
@@ -577,7 +640,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
     bool autoDump = false;
     if (!m_rules.armed && ambiguousFrames > 0)
     {
-        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG now = RTSKY_TICK();
         if (m_ambiguousSince == 0)
             m_ambiguousSince = now;
         if (!m_autoDumpDone && !m_autoDumpPath.empty() && now - m_ambiguousSince >= kAutoDumpAfterMs)
@@ -593,6 +656,9 @@ void FrameAnalyzer::Analyze(bool forceDump)
     {
         m_ambiguousSince = 0;
     }
+
+    if (!m_skyCubeLogged)
+        LogSkyCube(phases[phases.size() - 2].first, phases.back().first);
 
     if (m_dumpRequested || forceDump || autoDump)
         WriteDump(phases[phases.size() - 2].first, phases.back().first, m_rules);
@@ -611,6 +677,43 @@ void FrameAnalyzer::Analyze(bool forceDump)
     }
     m_window.erase(m_window.begin(), m_window.begin() + static_cast<std::ptrdiff_t>(keepFrom));
     m_markers.swap(keptMarkers);
+}
+
+void FrameAnalyzer::LogSkyCube(size_t begin, size_t end)
+{
+    int bindings = 0;
+    const void* resource = nullptr;
+    bool oneResource = true;
+    uint32_t sliceMask = 0;
+    const BindingRecord* first = nullptr;
+    for (size_t i = begin; i < end && i < m_window.size(); ++i)
+    {
+        const BindingRecord& r = m_window[i];
+        if (r.firstPassId != PassId::SkyCube || r.rtvCount < 1)
+            continue;
+        ++bindings;
+        if (first == nullptr)
+        {
+            first = &r;
+            resource = r.rtv[0].resource;
+        }
+        oneResource = oneResource && r.rtv[0].resource == resource;
+        if (r.rtv[0].arraySlice < 32)
+            sliceMask |= 1u << r.rtv[0].arraySlice;
+    }
+    if (first == nullptr)
+        return; // not in this frame (names unavailable, or the reflection pass was skipped)
+    m_skyCubeLogged = true;
+    std::string slices;
+    for (uint32_t s = 0; s < 32; ++s)
+    {
+        if (sliceMask & (1u << s))
+            slices += (slices.empty() ? "" : ",") + std::to_string(s);
+    }
+    const BoundTarget& t = first->rtv[0];
+    LOG_INFO("[SkyCube] %p: fmt %d %llux%u array %u: %d bindings per frame on %s, slices %s", resource, static_cast<int>(t.resourceFormat),
+             static_cast<unsigned long long>(t.width), t.height, t.arraySize, bindings, oneResource ? "one resource" : "SEVERAL resources",
+             slices.c_str());
 }
 
 void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& rules)
@@ -660,24 +763,25 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
         // Resource identities: which passes write the same target (e.g. the scene lighting buffer).
         if (r.rtvCount > 0)
             fprintf(f, " rt0=%p", static_cast<const void*>(r.rtv[0].resource));
+        if (r.rtvCount > 0 && r.rtv[0].arraySize > 1)
+            fprintf(f, " slice=%u/%u", r.rtv[0].arraySlice, r.rtv[0].arraySize);
         if (r.hasDsv)
             fprintf(f, " ds=%p", static_cast<const void*>(r.dsv.resource));
-        // Pixel shaders it drew with (RTSky_shaders\ps_<hash>.dxil with CaptureShaders=1; ? = unknown)
+        // Pixel shaders it drew with: entry names, else #<hash> (RTSky_shaders\ps_<hash>.dxil with
+        // CaptureShaders=1), else ? (pipeline created before RTSky's hooks)
         for (uint32_t p = 0; p < r.psoCount; ++p)
         {
-            const uint64_t hash = m_pipelineNamer != nullptr ? m_pipelineNamer(r.psos[p]) : 0;
-            if (hash != 0)
-                fprintf(f, "%s%016llx", p == 0 ? " ps=" : ",", static_cast<unsigned long long>(hash));
-            else
-                fprintf(f, "%s?", p == 0 ? " ps=" : ",");
+            const std::string label = m_pipelineNamer != nullptr ? m_pipelineNamer(r.psos[p]) : std::string("?");
+            fprintf(f, "%s%s", p == 0 ? " ps=" : ",", label.c_str());
         }
         if (r.psoCount == BindingRecord::kMaxPsos)
             fprintf(f, ",...");
         if (rules.armed && PrepareRuleMatches(rules, r))
             fprintf(f, "   <== PREPARE");
-        if (rules.armed && r.hdrOrdinal == rules.hdrOrdinal &&
-            (rules.hdrMrtBefore < 0 || static_cast<int32_t>(r.mrtBefore) == rules.hdrMrtBefore) && rules.hdr.Matches(r))
-            fprintf(f, "   <== COMPOSITE");
+        if (rules.armed && CompositeRuleMatches(rules, r))
+            fprintf(f, rules.compositeByName ? "   <== COMPOSITE (named)" : "   <== COMPOSITE");
+        if (r.firstPassId != PassId::Unknown && r.firstPassId == static_cast<PassId>(m_debugBlitPass.load(std::memory_order_relaxed)))
+            fprintf(f, "   <== DEBUG-BLIT");
         fprintf(f, "\n");
     }
     fclose(f);
@@ -710,8 +814,14 @@ bool FrameAnalyzer::MatchComposite(const ListState& s, const BindingRecord& r) c
     if (s.type != D3D12_COMMAND_LIST_TYPE_DIRECT || r.hdrOrdinal < 0)
         return false;
     const InjectionRules& rules = CachedRules();
-    return rules.armed && r.hdrOrdinal == rules.hdrOrdinal &&
-           (rules.hdrMrtBefore < 0 || static_cast<int32_t>(r.mrtBefore) == rules.hdrMrtBefore) && rules.hdr.Matches(r);
+    return rules.armed && CompositeRuleMatches(rules, r);
+}
+
+bool FrameAnalyzer::MatchDebugBlit(const ListState& s, const BindingRecord& r) const
+{
+    const PassId pass = static_cast<PassId>(m_debugBlitPass.load(std::memory_order_relaxed));
+    return s.type == D3D12_COMMAND_LIST_TYPE_DIRECT && pass != PassId::Unknown && r.firstPassId == pass && r.rtvCount >= 1 &&
+           r.rtv[0].resource != nullptr && r.draws > 0;
 }
 
 InjectionRules FrameAnalyzer::Rules() const

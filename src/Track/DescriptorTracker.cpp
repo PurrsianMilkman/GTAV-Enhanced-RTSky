@@ -74,6 +74,8 @@ void DescriptorTracker::OnCreateRTV(ID3D12Resource* resource, const D3D12_RENDER
     info.kind = ViewInfo::Kind::RTV;
     FillResourceInfo(resource, info);
     info.viewFormat = desc != nullptr ? desc->Format : info.resourceFormat;
+    if (desc != nullptr && desc->ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DARRAY)
+        info.firstArraySlice = static_cast<UINT16>(desc->Texture2DArray.FirstArraySlice);
     Store(handle, info);
 }
 
@@ -97,6 +99,25 @@ void DescriptorTracker::OnCreateSRV(ID3D12Resource* resource, const D3D12_SHADER
         Store(handle, info);
         return;
     }
+    // Texture SRVs: resource and view only (no GetDesc here, this is a hot path; the census reads
+    // the resource's desc while the game has it bound).
+    if (m_trackShaderViews && resource != nullptr)
+    {
+        ViewInfo info;
+        info.kind = ViewInfo::Kind::SRV;
+        info.resource = resource;
+        if (desc != nullptr)
+        {
+            info.viewFormat = desc->Format;
+            info.viewDimension = static_cast<uint8_t>(desc->ViewDimension);
+            if (desc->ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D)
+                info.planeSlice = static_cast<uint8_t>(desc->Texture2D.PlaneSlice);
+            else if (desc->ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY)
+                info.firstArraySlice = static_cast<UINT16>(desc->Texture2DArray.FirstArraySlice);
+        }
+        Store(handle, info);
+        return;
+    }
     // A regular SRV overwrote a slot that may have held a tracked view: forget it. Only erase when
     // present to keep this hot path cheap (the vast majority of SRVs are never tracked).
     Shard* s = ShardFor(handle.ptr);
@@ -105,6 +126,30 @@ void DescriptorTracker::OnCreateSRV(ID3D12Resource* resource, const D3D12_SHADER
     ReleaseSRWLockShared(&s->lock);
     if (present)
         Erase(handle);
+}
+
+void DescriptorTracker::Forget(D3D12_CPU_DESCRIPTOR_HANDLE handle)
+{
+    Shard* s = ShardFor(handle.ptr);
+    AcquireSRWLockShared(&s->lock);
+    const bool present = s->map.find(handle.ptr) != s->map.end();
+    ReleaseSRWLockShared(&s->lock);
+    if (present)
+        Erase(handle);
+}
+
+void DescriptorTracker::OnCreateCBV(const D3D12_CONSTANT_BUFFER_VIEW_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE handle)
+{
+    if (!m_trackShaderViews)
+        return;
+    ViewInfo info;
+    info.kind = ViewInfo::Kind::CBV;
+    if (desc != nullptr)
+    {
+        info.cbvLocation = desc->BufferLocation;
+        info.cbvSize = desc->SizeInBytes;
+    }
+    Store(handle, info);
 }
 
 void DescriptorTracker::Copy(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src)

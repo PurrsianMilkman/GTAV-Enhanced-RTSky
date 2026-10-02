@@ -55,6 +55,10 @@ struct InjectionRules
     BindingSignature hdr;
     int32_t hdrOrdinal = -1;
     int32_t hdrMrtBefore = -1;     // discriminator (>= 0: G-buffer bindings earlier in the same list)
+    // Composite by pass name: the binding whose first draw uses `compositePass` (plus `hdr`'s
+    // signature), instead of hdrOrdinal / hdrMrtBefore. Used whenever the game's pipelines are named.
+    bool compositeByName = false;
+    PassId compositePass = PassId::Unknown;
     bool depthClearKnown = false;
     float depthClearValue = 0.0f; // 0 -> reversed-Z, 1 -> standard Z
     uint64_t generation = 0;
@@ -69,17 +73,24 @@ public:
     // Cheap, lock-free on the fast path (thread-local copy refreshed on generation change).
     bool MatchPrepare(const ListState& s, const BindingRecord& r) const;
     bool MatchComposite(const ListState& s, const BindingRecord& r) const;
+    // The final image for the debug blit: a binding whose first draw is the configured pass
+    // (PS_LensDistortion). By name only, independent of the armed rules (Unknown = never).
+    bool MatchDebugBlit(const ListState& s, const BindingRecord& r) const;
+    void SetDebugBlitPass(PassId pass) { m_debugBlitPass.store(static_cast<uint8_t>(pass), std::memory_order_relaxed); }
     InjectionRules Rules() const;
 
-    void Configure(int compositeCandidate, int gbufferOrdinal, int compositeOrdinal, int stableFrames);
+    // compositePass: the pass the Composite goes after when pipelines are named (Unknown = the
+    // ordinal rule only). CompositeOrdinal >= 0 pins the ordinal rule.
+    void Configure(int compositeCandidate, int gbufferOrdinal, int compositeOrdinal, int stableFrames,
+                   PassId compositePass = PassId::DirectionalStandard);
     void RequestDump(const std::wstring& path);
     // Where to write a frame dump on its own, once per session, when the passes stay ambiguous for
     // kAutoDumpAfterMs (the dump is what resolves that, and testers rarely catch it with the key).
     void SetAutoDumpPath(const std::wstring& path);
     bool AutoDumpTriggered() const;
-    // Names a pipeline in the dump by its pixel-shader hash (0 = unknown). Kept as a callback so the
+    // Names a pipeline in the dump (entry name, else "#<hash>", else "?"). Kept as a callback so the
     // analyzer does not depend on the shader capture (host tests).
-    using PipelineNamer = uint64_t (*)(const void* pso);
+    using PipelineNamer = std::string (*)(const void* pso);
     void SetPipelineNamer(PipelineNamer namer) { m_pipelineNamer = namer; }
 
     // Human readable status line for the log
@@ -101,6 +112,8 @@ private:
 
     void Analyze(bool forceDump);
     void WriteDump(size_t begin, size_t end, const InjectionRules& rules);
+    // [SkyCube], once: the game's sky cube (ps_sky_water_reflection_all bindings) in one complete frame.
+    void LogSkyCube(size_t begin, size_t end);
     const InjectionRules& CachedRules() const;
 
     mutable SRWLOCK m_lock = SRWLOCK_INIT;
@@ -119,19 +132,24 @@ private:
     BindingSignature m_candHdr;
     int32_t m_candHdrOrdinal = -1;
     int32_t m_candHdrDisc = -1;
+    bool m_candHdrNamed = false;
     int m_stableCount = 0;
+    bool m_namedPassMissing = false; // names seen, but the Composite pass was not drawn after the G-buffer
 
     // Configuration
     int m_compositeCandidate = 0;
     int m_gbufferOrdinalOverride = -1;
     int m_compositeOrdinalOverride = -1;
     int m_stableFrames = 3;
+    PassId m_compositePass = PassId::DirectionalStandard;
+    std::atomic<uint8_t> m_debugBlitPass{ static_cast<uint8_t>(PassId::LensDistortion) };
 
     bool m_dumpRequested = false;
     std::wstring m_dumpPath;
     std::wstring m_autoDumpPath;
     PipelineNamer m_pipelineNamer = nullptr;
     bool m_autoDumpDone = false;
+    bool m_skyCubeLogged = false;
     ULONGLONG m_ambiguousSince = 0; // tick of the first analysis in the current ambiguous run, 0 = none
     std::string m_ambiguity;        // which pass was ambiguous in the last analysis, and how ("" = none)
     std::string m_status = "waiting for frames";

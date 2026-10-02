@@ -134,6 +134,11 @@ public:
                 v = parsed;
         }
     }
+    void Get(const char* key, std::string& v) const
+    {
+        if (const std::string* s = Find(key))
+            v = Trim(*s);
+    }
     // Virtual-key code: a number (0x61) or a name (Numpad1, NumpadAdd, F10, ...).
     void GetKey(const char* key, int& v) const
     {
@@ -254,10 +259,13 @@ bool Config::Load(const std::wstring& path)
     r.GetAutoInt("detection.gbufferordinal", gbufferOrdinal, -1);
     r.Get("detection.compositecandidate", compositeCandidate);
     r.GetAutoInt("detection.compositeordinal", compositeOrdinal, -1);
+    r.Get("detection.compositepass", compositePass);
+    r.Get("detection.debugblitpass", debugBlitPass);
     r.GetAutoInt("detection.tlasselect", tlasSelect, -1);
     r.Get("detection.tlasclone", tlasClone);
     r.Get("detection.stableframes", stableFrames);
     r.Get("detection.captureshaders", captureShaders);
+    r.Get("detection.trackshaderdescriptors", trackShaderDescriptors);
 
     r.Get("sky.sunintensity", sunIntensity);
     r.Get("sky.moonintensity", moonIntensity);

@@ -87,7 +87,7 @@ constexpr DXGI_FORMAT kFmtDepth = DXGI_FORMAT_R32_FLOAT;
 constexpr DXGI_FORMAT kFmtNormal = DXGI_FORMAT_R16G16_SNORM;
 constexpr DXGI_FORMAT kFmtColor = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-enum class Pso : uint32_t { Transmittance, MultiScatter, SkyView, SkyProject, Prepare, TraceInline, Temporal, ATrous, Composite, Probe, Count };
+enum class Pso : uint32_t { Transmittance, MultiScatter, SkyView, SkyProject, Prepare, TraceInline, Temporal, ATrous, Composite, Probe, DebugBlit, Count };
 
 // -------------------------------------------------------------------------------------------------
 // Helpers
@@ -170,6 +170,7 @@ struct ResourceSet
     ComPtr<ID3D12Resource> traceS, traceU;
     ComPtr<ID3D12Resource> histS[2], histU[2], histMeta[2];
     ComPtr<ID3D12Resource> filtS[2], filtU[2];
+    ComPtr<ID3D12Resource> debugView; // the current debug view at trace resolution (drawn late by DebugBlit)
     ~ResourceSet();
 };
 
@@ -207,6 +208,8 @@ public:
     bool EnsureReady(ID3D12GraphicsCommandList* list);
     void Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     void Composite(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
+    // Draws the current debug view into the game's final image (after PS_LensDistortion, before the UI).
+    void DebugBlit(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     // m_lock held. Starts a Prepare group: camera, PendingFrame, constants slot, depth SRV. Returns
     // false (with m_lastSkip set) when this frame cannot be prepared.
     bool BeginPrepareGroup(const BindingRecord& record, ID3D12Resource* depth, DXGI_FORMAT srvFormat, UINT vpX, UINT vpY, UINT w,
@@ -229,7 +232,9 @@ private:
     ComPtr<ID3D12Resource> CreateTexture(UINT w, UINT h, DXGI_FORMAT fmt, const wchar_t* name);
     ComPtr<ID3D12Resource> CreateBuffer(UINT64 size, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state, bool uav, const wchar_t* name);
     std::shared_ptr<ResourceSet> CreateSet(UINT w, UINT h);
-    bool EnsureSceneCopy(const D3D12_RESOURCE_DESC& gameDesc, std::shared_ptr<SceneCopy>* out);
+    // A UAV-capable copy of a game texture (same desc), cached in `cache`; allocation failures back off 5 s.
+    bool EnsureCopy(std::shared_ptr<SceneCopy>& cache, ULONGLONG& retryAt, const D3D12_RESOURCE_DESC& gameDesc, const wchar_t* name,
+                    std::shared_ptr<SceneCopy>* out);
 
     // Descriptors
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(uint32_t index) const { return { m_heapCpu.ptr + SIZE_T(index) * m_increment }; }
@@ -254,6 +259,7 @@ private:
     void FillConstants(gpu::FrameConstants& fc, const PendingFrame& f, const CameraFrame* prev, const Config& cfg, bool reset,
                        int tlasSpace, const float3& camPosForTlas, UINT targetX, UINT targetY, UINT targetW, UINT targetH, bool srgbTarget);
     bool FormatSupportsTypedUav(DXGI_FORMAT f);
+    bool FormatSupportsTypedStore(DXGI_FORMAT f);
 
     // Our resource states inside one injection
     struct OwnTracker
@@ -322,6 +328,7 @@ private:
 
     std::shared_ptr<ResourceSet> m_set;
     std::shared_ptr<SceneCopy> m_sceneCopy;
+    std::shared_ptr<SceneCopy> m_blitCopy; // the final image, for DebugBlit when it has no UAV flag
     PendingFrame m_pending;
     // Prepare group: every Prepare recorded since the last Composite belongs to one frame. The
     // G-buffer can be recorded in several parallel lists with a Prepare each (gbufferEvery); they
@@ -339,6 +346,8 @@ private:
     int m_lastDebugView = -1;
     ULONGLONG m_setRetryAt = 0;      // screen-resource allocation backoff (GetTickCount64)
     ULONGLONG m_sceneCopyRetryAt = 0; // scene-copy allocation backoff
+    ULONGLONG m_blitCopyRetryAt = 0;
+    std::string m_blitSkip;           // why the last DebugBlit was not recorded ("" = it was)
     uint64_t m_lastTlasSerial = 0;
     int m_tlasReuse = 0;
     uint32_t m_frameIndex = 0;
@@ -351,6 +360,7 @@ private:
     std::atomic<uint64_t> m_prepares{ 0 };
     std::atomic<ULONGLONG> m_lastRelitTick{ 0 }; // last Composite that relit the image
     std::atomic<ULONGLONG> m_lastHeldTick{ 0 };  // last Composite held back by the calibration gate
+    std::atomic<ULONGLONG> m_lastBlitTick{ 0 };  // last DebugBlit recorded into the final image
     std::atomic<uint64_t> m_lastExecutedPrepare{ 0 };
     std::atomic<uint64_t> m_pairingLag{ 0 };
     std::atomic<uint64_t> m_lateTlas{ 0 }; // composites upgraded to a newer TLAS at submission
@@ -551,6 +561,7 @@ bool RendererImpl::CreatePipelines()
         { Pso::ATrous, ShaderId::ATrous, L"RTSky ATrous" },
         { Pso::Composite, ShaderId::Composite, L"RTSky Composite" },
         { Pso::Probe, ShaderId::Probe, L"RTSky Probe" },
+        { Pso::DebugBlit, ShaderId::DebugBlit, L"RTSky DebugBlit" },
     };
     for (const Entry& e : entries)
     {
@@ -685,6 +696,7 @@ std::shared_ptr<ResourceSet> RendererImpl::CreateSet(UINT w, UINT h)
     }
     make(set->traceS, kFmtColor, L"RTSky trace S");
     make(set->traceU, kFmtColor, L"RTSky trace U");
+    make(set->debugView, kFmtColor, L"RTSky debug view");
     if (!ok)
     {
         // Retry in 5 s, and only log the first failure of a streak.
@@ -706,16 +718,16 @@ void RendererImpl::ReleaseRegion(uint32_t region)
     ReleaseSRWLockExclusive(&m_regionLock);
 }
 
-bool RendererImpl::EnsureSceneCopy(const D3D12_RESOURCE_DESC& gameDesc, std::shared_ptr<SceneCopy>* out)
+bool RendererImpl::EnsureCopy(std::shared_ptr<SceneCopy>& cache, ULONGLONG& retryAt, const D3D12_RESOURCE_DESC& gameDesc,
+                              const wchar_t* name, std::shared_ptr<SceneCopy>* out)
 {
-    if (m_sceneCopy && m_sceneCopy->desc.Width == gameDesc.Width && m_sceneCopy->desc.Height == gameDesc.Height &&
-        m_sceneCopy->desc.Format == gameDesc.Format && m_sceneCopy->desc.MipLevels == gameDesc.MipLevels &&
-        m_sceneCopy->desc.DepthOrArraySize == gameDesc.DepthOrArraySize)
+    if (cache && cache->desc.Width == gameDesc.Width && cache->desc.Height == gameDesc.Height && cache->desc.Format == gameDesc.Format &&
+        cache->desc.MipLevels == gameDesc.MipLevels && cache->desc.DepthOrArraySize == gameDesc.DepthOrArraySize)
     {
-        *out = m_sceneCopy;
+        *out = cache;
         return true;
     }
-    if (GetTickCount64() < m_sceneCopyRetryAt)
+    if (GetTickCount64() < retryAt)
         return false;
     D3D12_RESOURCE_DESC desc = gameDesc;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -727,16 +739,24 @@ bool RendererImpl::EnsureSceneCopy(const D3D12_RESOURCE_DESC& gameDesc, std::sha
     if (FAILED(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                  nullptr, IID_PPV_ARGS(&copy->resource))))
     {
-        if (m_sceneCopyRetryAt == 0)
-            LOG_ERROR("Scene copy allocation failed (out of video memory?) - retrying every 5 s");
-        m_sceneCopyRetryAt = GetTickCount64() + 5000;
+        if (retryAt == 0)
+            LOG_ERROR("%ls allocation failed (out of video memory?) - retrying every 5 s", name);
+        retryAt = GetTickCount64() + 5000;
         return false;
     }
-    copy->resource->SetName(L"RTSky scene copy");
+    copy->resource->SetName(name);
     copy->desc = gameDesc;
-    m_sceneCopy = copy; // in-flight users keep the previous one alive through their attachments
+    cache = copy; // in-flight users keep the previous one alive through their attachments
     *out = copy;
     return true;
+}
+
+bool RendererImpl::FormatSupportsTypedStore(DXGI_FORMAT f)
+{
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT fs = {};
+    fs.Format = f;
+    return SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) &&
+           (fs.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 && (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -1040,7 +1060,9 @@ void RendererImpl::FillConstants(gpu::FrameConstants& fc, const PendingFrame& f,
     fc.compositeParams = F4(Saturate(cfg.strength), cfg.minRatio, cfg.maxRatio, std::max(cfg.gameSkyOcclusion, 0.0f));
     fc.compositeParams2 = F4(cfg.directScale, std::max(cfg.artificialAmbient, 0.0f), Saturate(cfg.groundAlbedo), 0.0f);
     fc.compositeParams3 = F4(fade, std::max(cfg.nearFadeDistance, 0.0f), static_cast<float>(cfg.debugView), srgbTarget ? 1.0f : 0.0f);
-    fc.compositeParams4 = F4(cfg.fadeStart, cfg.fadeEnd, cfg.compareSplit ? 1.0f : 0.0f, 0.0f);
+    // Debug views go only to the DebugView texture while the late blit draws them (seen within 1 s).
+    const bool blitActive = GetTickCount64() - m_lastBlitTick.load(std::memory_order_relaxed) < 1000;
+    fc.compositeParams4 = F4(cfg.fadeStart, cfg.fadeEnd, cfg.compareSplit ? 1.0f : 0.0f, blitActive ? 1.0f : 0.0f);
 
     // Calibration hypotheses: latency l (0..3) x TLAS space s (0 world, 1 camera-relative)
     for (int l = 0; l < Calibration::kLatencies; ++l)
@@ -1381,7 +1403,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         return skip("the HDR target format does not support typed UAV loads");
     const bool inPlace = (targetDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
     std::shared_ptr<SceneCopy> sceneCopy;
-    if (!inPlace && !EnsureSceneCopy(targetDesc, &sceneCopy))
+    if (!inPlace && !EnsureCopy(m_sceneCopy, m_sceneCopyRetryAt, targetDesc, L"RTSky scene copy", &sceneCopy))
         return skip("scene copy unavailable");
 
     GameResourceState targetState;
@@ -1454,6 +1476,7 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     // UAV of the composite destination (slot table, UAV half)
     const uint32_t slotBase = SlotTableBase(slot);
     UavTex(slotBase + kTableSrv, inPlace ? target : sceneCopy->resource.Get(), uavFormat);
+    UavTex(slotBase + kTableSrv + 1, set.debugView.Get(), kFmtColor);
 
     // --- record ---
     ComPtr<ID3D12GraphicsCommandList4> list4;
@@ -1596,9 +1619,10 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         return;
     }
 
-    // Composite into the game's HDR target
+    // Composite into the game's HDR target (and the current debug view into DebugView)
     gpu::PassConstants none = {};
     const uint32_t compBase = SetTableBase(set, compositeTable + p);
+    own.Use(set.debugView.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if (inPlace)
     {
         own.Flush(list);
@@ -1659,6 +1683,141 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
         LOG_INFO("First Composite injection recorded (%s, %s, target format %d, %ux%u)", usePipeline ? "DXR pipeline" : "inline RayQuery",
                  inPlace ? "in place" : "via copy", static_cast<int>(uavFormat), tw, th);
     m_lastSkip.clear();
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+// -------------------------------------------------------------------------------------------------
+// Injection 3: DebugBlit (end of PS_LensDistortion, the final image before the UI)
+// -------------------------------------------------------------------------------------------------
+namespace {
+// Format a compute shader can store into for a render target: the view's format without sRGB (UAVs
+// cannot be sRGB), as long as the resource is typeless or already has that format.
+DXGI_FORMAT StoreFormat(DXGI_FORMAT resourceFormat, DXGI_FORMAT viewFormat)
+{
+    DXGI_FORMAT f = viewFormat;
+    if (f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+        f = DXGI_FORMAT_B8G8R8A8_UNORM;
+    else if (f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+        f = DXGI_FORMAT_R8G8B8A8_UNORM;
+    const bool typeless = resourceFormat == DXGI_FORMAT_B8G8R8A8_TYPELESS || resourceFormat == DXGI_FORMAT_R8G8B8A8_TYPELESS ||
+                          resourceFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS || resourceFormat == DXGI_FORMAT_R16G16B16A16_TYPELESS;
+    return typeless || resourceFormat == f ? f : DXGI_FORMAT_UNKNOWN;
+}
+} // namespace
+
+void RendererImpl::DebugBlit(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg)
+{
+    if (cfg.debugView == RTSKY_VIEW_NONE)
+        return;
+    ID3D12Resource* target = record.rtv[0].resource;
+    if (record.rtvCount < 1 || target == nullptr)
+        return;
+
+    AcquireSRWLockExclusive(&m_lock);
+    auto skip = [&](const char* reason) {
+        m_blitSkip = reason;
+        ReleaseSRWLockExclusive(&m_lock);
+    };
+    // Only once the Composite has written a debug view recently (it draws into DebugView).
+    if (!m_set || m_lastCompositeTraceW == 0 || GetTickCount64() - m_lastRelitTick.load() > 1000)
+        return skip("no debug view written recently");
+    const std::shared_ptr<ResourceSet> set = m_set;
+
+    const D3D12_RESOURCE_DESC desc = ResourceDesc(target);
+    if (desc.SampleDesc.Count != 1 || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+        return skip("unsupported final image");
+    if (desc.MipLevels != 1 || desc.DepthOrArraySize != 1)
+        return skip("the final image has several subresources");
+    const DXGI_FORMAT uavFormat = StoreFormat(desc.Format, record.rtv[0].viewFormat);
+    if (uavFormat == DXGI_FORMAT_UNKNOWN || !FormatSupportsTypedStore(uavFormat))
+        return skip("the final image's format cannot be written by a compute shader");
+    const bool inPlace = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+    std::shared_ptr<SceneCopy> copy;
+    if (!inPlace && !EnsureCopy(m_blitCopy, m_blitCopyRetryAt, desc, L"RTSky debug blit copy", &copy))
+        return skip("debug blit copy unavailable");
+
+    // State of the final image at the end of its binding (as for the Composite's target).
+    GameResourceState targetState;
+    {
+        track::ObservedState o;
+        if (track::FindObservedState(state, target, record.barrierSeqAtLastDraw, &o))
+        {
+            if (!StateFromObserved(o, &targetState))
+                return skip("the final image was transitioned to an unsupported (or split) state after its last draw");
+        }
+        else
+        {
+            const track::BarrierApi api = track::LastBarrierApi(target);
+            targetState.enhanced = api == track::BarrierApi::Enhanced || (api == track::BarrierApi::Unknown && track::GameUsesEnhancedBarriers());
+            targetState.usage = Usage::RenderTarget;
+            targetState.legacyState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            targetState.layout = D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+        }
+    }
+
+    UINT tx = 0, ty = 0, tw = static_cast<UINT>(desc.Width), th = desc.Height;
+    if (record.viewportValid && record.viewport.Width >= 16.0f && record.viewport.Height >= 16.0f)
+    {
+        tx = static_cast<UINT>(std::max(record.viewport.TopLeftX, 0.0f));
+        ty = static_cast<UINT>(std::max(record.viewport.TopLeftY, 0.0f));
+        tw = std::min(static_cast<UINT>(record.viewport.Width + 0.5f), static_cast<UINT>(desc.Width) - tx);
+        th = std::min(static_cast<UINT>(record.viewport.Height + 0.5f), desc.Height - ty);
+    }
+
+    uint32_t slot = 0;
+    std::shared_ptr<void> slotHandle = ClaimSlot(&slot, 0, false, false);
+    if (!slotHandle)
+        return skip("all injection slots in flight");
+    // The blit reads only its pass constants; the frame constants are bound but unused.
+    std::memset(m_constantsMapped + SIZE_T(slot) * kConstantSlotSize, 0, sizeof(gpu::FrameConstants));
+    const uint32_t slotBase = SlotTableBase(slot);
+    SrvTex(slotBase + 0, set->debugView.Get(), kFmtColor);
+    UavTex(slotBase + kTableSrv, inPlace ? target : copy->resource.Get(), uavFormat);
+    gpu::PassConstants pc = {};
+    pc.args0 = { tx, ty, tw, th };
+    pc.args1 = { m_lastCompositeTraceW, m_lastCompositeTraceH, 0, 0 };
+
+    // --- record ---
+    OwnTracker own;
+    BeginPasses(list, slot, kTlasNull);
+    if (inPlace)
+    {
+        TransitionGame(list, target, targetState, Usage::ComputeWrite, false);
+        Run(list, Pso::DebugBlit, slotBase, slotBase + kTableSrv, DivUp(tw, RTSKY_GROUP_SIZE), DivUp(th, RTSKY_GROUP_SIZE), 1, &pc);
+        RestoreGame(list, target, Usage::ComputeWrite, targetState, false);
+    }
+    else
+    {
+        // Every pixel of the viewport is written, so the copy needs no copy of the game's image first;
+        // only the viewport goes back.
+        ID3D12Resource* c = copy->resource.Get();
+        own.Use(c, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        own.Flush(list);
+        Run(list, Pso::DebugBlit, slotBase, slotBase + kTableSrv, DivUp(tw, RTSKY_GROUP_SIZE), DivUp(th, RTSKY_GROUP_SIZE), 1, &pc);
+        own.Use(c, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        own.Flush(list);
+        TransitionGame(list, target, targetState, Usage::CopyDest, false);
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = target;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION src = dst;
+        src.pResource = c;
+        const D3D12_BOX box = { tx, ty, 0, tx + tw, ty + th, 1 };
+        list->CopyTextureRegion(&dst, tx, ty, 0, &src, &box);
+        RestoreGame(list, target, Usage::CopyDest, targetState, false);
+    }
+    own.Rest(list);
+    track::RestoreState(list, state);
+
+    Lifetime().AttachBusy(state, slotHandle);
+    Lifetime().Attach(state, std::static_pointer_cast<void>(set));
+    if (copy)
+        Lifetime().Attach(state, std::static_pointer_cast<void>(copy));
+    if (m_lastBlitTick.exchange(GetTickCount64()) == 0)
+        LOG_INFO("First debug blit recorded (%s, format %d, %ux%u, %s)", track::PassName(record.firstPassId), static_cast<int>(uavFormat), tw,
+                 th, inPlace ? "in place" : "via copy");
+    m_blitSkip.clear();
     ReleaseSRWLockExclusive(&m_lock);
 }
 
@@ -1834,6 +1993,17 @@ std::vector<std::string> RendererImpl::OverlayLines(const Config& cfg)
              ViewName(cfg.debugView), cfg.compareSplit ? "ON" : "off", cfg.strength, cfg.sunShadowRays ? "on" : "off", foliage,
              cfg.nearField ? "on" : "off", cfg.denoiser ? "on" : "off");
     lines.push_back(buf);
+    if (cfg.debugView != RTSKY_VIEW_NONE)
+    {
+        AcquireSRWLockShared(&m_lock);
+        const std::string blitSkip = m_blitSkip;
+        ReleaseSRWLockShared(&m_lock);
+        if (now - m_lastBlitTick.load() < 1000)
+            lines.push_back("Debug view: drawn into the final image (" + cfg.debugBlitPass + ")");
+        else
+            lines.push_back("Debug view: drawn into the scene - " +
+                            (blitSkip.empty() ? cfg.debugBlitPass + " not seen yet" : blitSkip));
+    }
     return lines;
 }
 
@@ -1862,7 +2032,8 @@ void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, c
     const track::FrameAnalyzer& analyzer = track::Analyzer();
     const bool prepare = !state.injectedPrepare && analyzer.MatchPrepare(state, record);
     const bool composite = !state.injectedComposite && analyzer.MatchComposite(state, record);
-    if (!prepare && !composite)
+    const bool blit = !state.injectedDebugBlit && analyzer.MatchDebugBlit(state, record);
+    if (!prepare && !composite && !blit)
         return;
     if (record.noInjectAfter)
     {
@@ -1893,6 +2064,11 @@ void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, c
     {
         state.injectedComposite = true;
         r.Composite(list, state, rec, cfg);
+    }
+    if (blit)
+    {
+        state.injectedDebugBlit = true;
+        r.DebugBlit(list, state, rec, cfg);
     }
 }
 

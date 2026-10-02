@@ -18,6 +18,7 @@ StructuredBuffer<SkyData> g_SkyData : register(t4);
 Texture2D<float4> g_HistMeta : register(t5);
 Texture2D<float4> g_TraceS : register(t6);
 RWTexture2D<float4> g_Color : register(u0);
+RWTexture2D<float4> g_DebugView : register(u1); // trace resolution; drawn into the final image by DebugBlitCS
 
 float3 SkyVisibilityRatio(float4 s, float4 u)
 {
@@ -47,11 +48,15 @@ void CompositeCS(uint3 id : SV_DispatchThreadID)
     float2 uv = (float2(local) + 0.5f) / vpSize;
     uint2 tp = min(uint2(uv * g_Frame.traceSize.xy), uint2(g_Frame.traceSize.xy) - 1);
 
+    uint view = (uint)g_Frame.compositeParams3.z;
     float z = g_Depth.Load(int3(tp, 0));
     if (z <= 0.0f)
-        return; // sky / no geometry: untouched
-
-    uint view = (uint)g_Frame.compositeParams3.z;
+    {
+        // Sky / no geometry: the game's image is untouched; a debug view shows black there.
+        if (view != RTSKY_VIEW_NONE)
+            g_DebugView[tp] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        return;
+    }
     float4 color = g_Color[target];
 
     float4 s = g_FiltS.Load(int3(tp, 0));
@@ -89,31 +94,32 @@ void CompositeCS(uint3 id : SV_DispatchThreadID)
     float strength = g_Frame.compositeParams.x * fade;
 
     float3 result;
+    float3 dbg = 0.0f; // raw debug-view value
     switch (view)
     {
     case RTSKY_VIEW_SKY_RATIO:
-        result = EncodeForTarget(R);
+        dbg = R;
         break;
     case RTSKY_VIEW_SUN_VIS:
-        result = EncodeForTarget(sunVisibility.xxx);
+        dbg = sunVisibility.xxx;
         break;
     case RTSKY_VIEW_NORMALS:
-        result = EncodeForTarget(N * 0.5f + 0.5f);
+        dbg = N * 0.5f + 0.5f;
         break;
     case RTSKY_VIEW_DEPTH:
-        result = EncodeForTarget(frac(log2(max(z, 1e-3f))).xxx);
+        dbg = frac(log2(max(z, 1e-3f))).xxx;
         break;
     case RTSKY_VIEW_SKY_S:
-        result = EncodeForTarget(s.rgb / max(Luminance(eSky) * INV_PI * TraceRadianceScale(), 1e-8f));
+        dbg = s.rgb / max(Luminance(eSky) * INV_PI * TraceRadianceScale(), 1e-8f);
         break;
     case RTSKY_VIEW_TLAS:
-        result = EncodeForTarget(g_TraceS.Load(int3(tp, 0)).rgb);
+        dbg = g_TraceS.Load(int3(tp, 0)).rgb;
         break;
     case RTSKY_VIEW_RATIO:
-        result = EncodeForTarget(ratio * 0.5f);
+        dbg = ratio * 0.5f;
         break;
     case RTSKY_VIEW_HISTORY:
-        result = EncodeForTarget((g_HistMeta.Load(int3(tp, 0)).x / max(g_Frame.temporalParams.x, 1.0f)).xxx);
+        dbg = (g_HistMeta.Load(int3(tp, 0)).x / max(g_Frame.temporalParams.x, 1.0f)).xxx;
         break;
     default:
     {
@@ -123,6 +129,14 @@ void CompositeCS(uint3 id : SV_DispatchThreadID)
         result = color.rgb * multiplier;
         break;
     }
+    }
+    if (view != RTSKY_VIEW_NONE)
+    {
+        g_DebugView[tp] = float4(dbg, 1.0f);
+        // The late debug blit draws it into the final image; the scene colour stays the game's.
+        if (g_Frame.compositeParams4.w > 0.5f)
+            return;
+        result = EncodeForTarget(dbg);
     }
 
     // Split-screen compare (hotkey): left half untouched, right half as above, with a bright divider.
