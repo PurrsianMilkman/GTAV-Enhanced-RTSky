@@ -17,12 +17,17 @@ add_executable(RTSkyMathTests MathTests.cpp "${RTSKY_SRC}/Game/SunModel.cpp" "${
 target_include_directories(RTSkyMathTests PRIVATE "${RTSKY_SRC}")
 add_test(NAME math COMMAND RTSkyMathTests)
 
+add_executable(RTSkyPassNamesTests PassNamesTests.cpp "${RTSKY_SRC}/Track/PassNames.cpp")
+target_include_directories(RTSkyPassNamesTests PRIVATE "${RTSKY_SRC}")
+add_test(NAME passnames COMMAND RTSkyPassNamesTests)
+
 if(RTSKY_DIRECTX_HEADERS_DIR AND NOT WIN32)
     find_package(Threads REQUIRED)
     add_executable(RTSkyAnalyzerTests AnalyzerTests.cpp
         "${RTSKY_SRC}/Track/FrameAnalyzer.cpp"
         "${RTSKY_SRC}/Track/CommandListTracker.cpp"
-        "${RTSKY_SRC}/Track/DescriptorTracker.cpp")
+        "${RTSKY_SRC}/Track/DescriptorTracker.cpp"
+        "${RTSKY_SRC}/Track/PassNames.cpp")
     target_include_directories(RTSkyAnalyzerTests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${RTSKY_DIRECTX_HEADERS_DIR}/include"

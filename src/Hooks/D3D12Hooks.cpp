@@ -229,7 +229,7 @@ HRESULT STDMETHODCALLTYPE Device_CreateGraphicsPipelineState(ID3D12Device* self,
     HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateGraphicsPipelineState, self, desc, riid, pso);
     ComPtr<ID3D12PipelineState> p;
     if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
-        track::NotePipeline(p.Get(), desc->PS);
+        track::NotePipeline(p.Get(), desc->PS, desc->pRootSignature);
     return hr;
 }
 
@@ -251,7 +251,7 @@ HRESULT STDMETHODCALLTYPE Library_LoadGraphicsPipeline(ID3D12PipelineLibrary* se
     HRESULT hr = Orig<Fn>(g_library, RTSKY_IDX_Library_LoadGraphicsPipeline, self, name, desc, riid, pso);
     ComPtr<ID3D12PipelineState> p;
     if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
-        track::NotePipeline(p.Get(), desc->PS);
+        track::NotePipeline(p.Get(), desc->PS, desc->pRootSignature);
     return hr;
 }
 
@@ -411,11 +411,7 @@ void STDMETHODCALLTYPE CL_RSSetViewports(CL* self, UINT count, const D3D12_VIEWP
 void STDMETHODCALLTYPE CL_SetPipelineState(CL* self, ID3D12PipelineState* pso)
 {
     if (ListState* s = Track(self))
-    {
-        s->pipelineKind = ListState::PipelineKind::Pso;
-        s->pso = pso;
-        s->stateObject = nullptr;
-    }
+        track::OnSetPipelineState(*s, pso);
     using Fn = void(STDMETHODCALLTYPE*)(CL*, ID3D12PipelineState*);
     Orig<Fn>(g_list, RTSKY_IDX_CL_SetPipelineState, self, pso);
 }
@@ -423,11 +419,7 @@ void STDMETHODCALLTYPE CL_SetPipelineState(CL* self, ID3D12PipelineState* pso)
 void STDMETHODCALLTYPE CL_SetPipelineState1(CL* self, ID3D12StateObject* stateObject)
 {
     if (ListState* s = Track(self))
-    {
-        s->pipelineKind = ListState::PipelineKind::StateObject;
-        s->stateObject = stateObject;
-        s->pso = nullptr;
-    }
+        track::OnSetStateObject(*s, stateObject);
     using Fn = void(STDMETHODCALLTYPE*)(CL*, ID3D12StateObject*);
     Orig<Fn>(g_list, RTSKY_IDX_CL_SetPipelineState1, self, stateObject);
 }
