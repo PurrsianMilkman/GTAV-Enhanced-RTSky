@@ -7,7 +7,9 @@
 //     and the injection point is the phase's LAST binding;
 //   * the HDR lighting pass: the n-th binding after the G-buffer phase whose first render target has
 //     a float format and the G-buffer's dimensions.
-// A rule is only armed when it matches exactly one binding per frame.
+// A rule is only armed when it matches exactly one binding per frame. Exception: a G-buffer recorded
+// in parallel lists (the same binding at the same ordinal in each) arms Prepare after every one of
+// them, provided they all lie inside the G-buffer phase (InjectionRules::gbufferEvery).
 // It turns them into two injection rules that are matched cheaply at recording time:
 //   Prepare   (end of the G-buffer pass: depth is known to be writable -> DEPTH_WRITE)
 //   Composite (end of the HDR lighting pass: the target was just drawn to -> RENDER_TARGET)
@@ -46,6 +48,10 @@ struct InjectionRules
     BindingSignature gbuffer;
     int32_t gbufferOrdinal = -1;
     int32_t gbufferHdrBefore = -1; // discriminator (>= 0: HDR bindings earlier in the same list)
+    // Prepare after EVERY depth-writing binding of the rule, not one: the G-buffer is recorded in
+    // several parallel command lists that all bind it at the same ordinal (GTA V Enhanced: ~15). All
+    // of them lie inside the G-buffer phase, so the last one the GPU runs sees the complete depth.
+    bool gbufferEvery = false;
     BindingSignature hdr;
     int32_t hdrOrdinal = -1;
     int32_t hdrMrtBefore = -1;     // discriminator (>= 0: G-buffer bindings earlier in the same list)
@@ -105,6 +111,7 @@ private:
     BindingSignature m_candGbuffer;
     int32_t m_candGbufferOrdinal = -1;
     int32_t m_candGbufferDisc = -1;
+    bool m_candGbufferEvery = false;
     BindingSignature m_candHdr;
     int32_t m_candHdrOrdinal = -1;
     int32_t m_candHdrDisc = -1;
