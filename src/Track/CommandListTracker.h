@@ -12,6 +12,7 @@
 
 #include <d3d12.h>
 
+#include "PassNames.h"
 #include "TlasTracker.h"
 
 #include <cstdint>
@@ -30,6 +31,8 @@ struct BoundTarget
     UINT height = 0;
     UINT sampleCount = 1;
     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
+    UINT16 arraySize = 1;  // of the resource
+    UINT16 arraySlice = 0; // first slice the view targets (array RTVs: the sky cube faces)
 };
 
 struct BindingRecord
@@ -57,6 +60,9 @@ struct BindingRecord
     static constexpr uint32_t kMaxPsos = 4;
     const void* psos[kMaxPsos] = {};
     uint32_t psoCount = 0;
+    // Pass of the pipeline of the first draw (by its pixel shader's entry name), and every pass drawn.
+    PassId firstPassId = PassId::Unknown;
+    uint32_t passMask = 0; // PassBit()s
 };
 
 // Classification helpers shared by the tracker, the analyzer and the injector.
@@ -120,6 +126,7 @@ struct ListState
     PipelineKind pipelineKind = PipelineKind::None;
     ID3D12PipelineState* pso = nullptr;
     ID3D12StateObject* stateObject = nullptr;
+    PassId psoPass = PassId::Unknown; // pass of `pso`, resolved once per pipeline change
 
     ID3D12DescriptorHeap* heaps[2] = {};
     uint32_t heapCount = 0;
@@ -163,6 +170,7 @@ struct ListState
     // Injection bookkeeping (owned by the Renderer)
     bool injectedPrepare = false;
     bool injectedComposite = false;
+    bool injectedDebugBlit = false;
     uint64_t preparedSerial = 0;          // Prepare recorded into this list (serial), 0 = none
     uint64_t compositeConsumedSerial = 0; // Prepare serial the Composite in this list paired with
     // Objects referenced by commands RTSky recorded into this list; kept alive until the GPU has
@@ -184,7 +192,13 @@ ListState* GetListState(ID3D12GraphicsCommandList* list);
 ListState* FindListState(ID3D12CommandList* list);
 
 // Recording helpers called by the hooks
+// Resolves a pipeline's pass (ShaderCapture in the mod, a table in the host tests); unset = Unknown.
+using PassResolver = PassId (*)(const void* pso);
+void SetPassResolver(PassResolver resolver);
+
 void OnReset(ListState& s, ID3D12PipelineState* initialPso);
+void OnSetPipelineState(ListState& s, ID3D12PipelineState* pso);
+void OnSetStateObject(ListState& s, ID3D12StateObject* stateObject);
 void OnSetRenderTargets(ListState& s, UINT count, const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, BOOL singleRange,
                         const D3D12_CPU_DESCRIPTOR_HANDLE* dsv, UINT rtvDescriptorIncrement);
 void OnBeginRenderPass(ListState& s, UINT count, const D3D12_RENDER_PASS_RENDER_TARGET_DESC* rts,

@@ -21,6 +21,14 @@ thread_local ListState* t_cachedState = nullptr;
 
 std::atomic<uint64_t> g_resetSerial{ 0 };
 
+std::atomic<PassResolver> g_passResolver{ nullptr };
+
+PassId ResolvePass(const void* pso)
+{
+    const PassResolver resolver = g_passResolver.load(std::memory_order_acquire);
+    return pso != nullptr && resolver != nullptr ? resolver(pso) : PassId::Unknown;
+}
+
 // resource -> last barrier API used by the game
 SRWLOCK g_apiLock = SRWLOCK_INIT;
 std::unordered_map<ID3D12Resource*, BarrierApi>* g_barrierApi = nullptr;
@@ -52,6 +60,8 @@ BoundTarget ToBoundTarget(const ViewInfo& v)
     t.height = v.height;
     t.sampleCount = v.sampleCount;
     t.flags = v.resourceFlags;
+    t.arraySize = v.depthOrArraySize;
+    t.arraySlice = v.firstArraySlice;
     return t;
 }
 
@@ -125,6 +135,7 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     resetSerial = g_resetSerial.fetch_add(1, std::memory_order_relaxed) + 1;
     pipelineKind = initialPso != nullptr ? PipelineKind::Pso : PipelineKind::None;
     pso = initialPso;
+    psoPass = ResolvePass(initialPso);
     stateObject = nullptr;
     heaps[0] = heaps[1] = nullptr;
     heapCount = 0;
@@ -152,6 +163,7 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     stateUnknown = false;
     injectedPrepare = false;
     injectedComposite = false;
+    injectedDebugBlit = false;
     preparedSerial = 0;
     compositeConsumedSerial = 0;
     attachments.clear();
@@ -412,6 +424,10 @@ void OnDraw(ListState& s)
         r.viewport = s.viewport;
         r.viewportValid = true;
     }
+    const PassId pass = s.pipelineKind == ListState::PipelineKind::Pso ? s.psoPass : PassId::Unknown;
+    if (r.draws == 0)
+        r.firstPassId = pass;
+    r.passMask |= PassBit(pass);
     ++r.draws;
     r.barrierSeqAtLastDraw = s.barrierSeq;
     if (s.pipelineKind == ListState::PipelineKind::Pso && s.pso != nullptr && r.psoCount < BindingRecord::kMaxPsos)
@@ -422,6 +438,29 @@ void OnDraw(ListState& s)
         if (!seen)
             r.psos[r.psoCount++] = s.pso;
     }
+}
+
+void SetPassResolver(PassResolver resolver)
+{
+    g_passResolver.store(resolver, std::memory_order_release);
+}
+
+void OnSetPipelineState(ListState& s, ID3D12PipelineState* pso)
+{
+    // One lookup per pipeline change, not per draw.
+    if (s.pipelineKind != ListState::PipelineKind::Pso || s.pso != pso)
+        s.psoPass = ResolvePass(pso);
+    s.pipelineKind = ListState::PipelineKind::Pso;
+    s.pso = pso;
+    s.stateObject = nullptr;
+}
+
+void OnSetStateObject(ListState& s, ID3D12StateObject* stateObject)
+{
+    s.pipelineKind = ListState::PipelineKind::StateObject;
+    s.stateObject = stateObject;
+    s.pso = nullptr;
+    s.psoPass = PassId::Unknown;
 }
 
 void OnViewports(ListState& s, UINT count, const D3D12_VIEWPORT* viewports)

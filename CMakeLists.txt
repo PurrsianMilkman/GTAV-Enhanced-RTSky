@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(RTSky VERSION 0.1.4 LANGUAGES C CXX)
+project(RTSky VERSION 0.2.0 LANGUAGES C CXX)
 
 # -------------------------------------------------------------------------------------------------
 # Options
@@ -90,7 +90,8 @@ set(RTSKY_SHADERS
     "Temporal|TemporalCS.hlsl|TemporalCS|cs_6_0"
     "ATrous|ATrousCS.hlsl|ATrousCS|cs_6_0"
     "Composite|CompositeCS.hlsl|CompositeCS|cs_6_0"
-    "Probe|ProbeCS.hlsl|ProbeCS|cs_6_5")
+    "Probe|ProbeCS.hlsl|ProbeCS|cs_6_5"
+    "DebugBlit|DebugBlitCS.hlsl|DebugBlitCS|cs_6_0")
 
 foreach(_spec IN LISTS RTSKY_SHADERS)
     string(REPLACE "|" ";" _parts "${_spec}")
@@ -142,12 +143,16 @@ add_library(RTSky SHARED
     src/Render/Barriers.cpp
     src/Render/Calibration.cpp
     src/Render/GpuLifetime.cpp
+    src/Render/InputCensus.cpp
     src/Render/Renderer.cpp
     src/Render/RtPipeline.cpp
     src/Render/ShaderBlobs.cpp
     src/Track/CommandListTracker.cpp
     src/Track/DescriptorTracker.cpp
     src/Track/FrameAnalyzer.cpp
+    src/Track/BufferTracker.cpp
+    src/Track/PassNames.cpp
+    src/Track/RootSignatureTracker.cpp
     src/Track/ShaderCapture.cpp
     src/Track/TlasTracker.cpp
     ${RTSKY_SHADER_HEADERS})
@@ -182,4 +187,33 @@ if(RTSKY_BUILD_TESTS)
     add_executable(RTSkyMathTests tests/MathTests.cpp src/Game/SunModel.cpp src/Game/Weather.cpp)
     target_include_directories(RTSkyMathTests PRIVATE src)
     add_test(NAME RTSkyMathTests COMMAND RTSkyMathTests)
+    add_executable(RTSkyPassNamesTests tests/PassNamesTests.cpp src/Track/PassNames.cpp)
+    target_include_directories(RTSkyPassNamesTests PRIVATE src)
+    add_test(NAME RTSkyPassNamesTests COMMAND RTSkyPassNamesTests)
+    # The frame-analyzer scenarios against the real tracker / analyzer sources (on Windows the SDK's own
+    # headers stand in for the Linux shims of tests/CMakeLists.txt).
+    add_executable(RTSkyAnalyzerTests tests/AnalyzerTests.cpp src/Track/FrameAnalyzer.cpp src/Track/CommandListTracker.cpp
+                   src/Track/DescriptorTracker.cpp src/Track/PassNames.cpp)
+    target_include_directories(RTSkyAnalyzerTests BEFORE PRIVATE "${DXH_ROOT}/include/directx" "${DXH_ROOT}/include")
+    target_include_directories(RTSkyAnalyzerTests PRIVATE src)
+    target_link_libraries(RTSkyAnalyzerTests PRIVATE dxguid)
+    # The analyzer reads GetTickCount64; the scenarios advance a fake clock instead (tests/shim on Linux).
+    target_compile_definitions(RTSkyAnalyzerTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS
+                               RTSKY_TEST_CLOCK)
+    target_compile_options(RTSkyAnalyzerTests PRIVATE /W4 /wd4100)
+    add_test(NAME RTSkyAnalyzerTests COMMAND RTSkyAnalyzerTests)
+    add_executable(RTSkyRootSignatureTests tests/RootSignatureTests.cpp src/Track/RootSignatureTracker.cpp src/Common/Log.cpp)
+    target_include_directories(RTSkyRootSignatureTests BEFORE PRIVATE "${DXH_ROOT}/include/directx" "${DXH_ROOT}/include")
+    target_include_directories(RTSkyRootSignatureTests PRIVATE src)
+    target_compile_definitions(RTSkyRootSignatureTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(RTSkyRootSignatureTests PRIVATE /W4)
+    add_test(NAME RTSkyRootSignatureTests COMMAND RTSkyRootSignatureTests)
+endif()
+
+# Development tool: the pass-name scanner over a directory of captured shaders (not released)
+option(RTSKY_BUILD_TOOLS "Build the development tools" OFF)
+if(RTSKY_BUILD_TOOLS)
+    add_executable(rtsky_names tools/rtsky_names/main.cpp src/Track/PassNames.cpp)
+    target_include_directories(rtsky_names PRIVATE src)
+    target_compile_definitions(rtsky_names PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 endif()

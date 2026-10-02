@@ -96,10 +96,16 @@ struct Config
     int gbufferOrdinal = -1;       // -1 auto, else ordinal of the MRT binding in its command list
     int compositeCandidate = 0;    // n-th float HDR binding after the G-buffer (execution order)
     int compositeOrdinal = -1;     // -1 auto, else per-list ordinal of the HDR binding to hook
+    // Pixel-shader entry name of the pass the Composite goes after ("" or "ordinal" = the format /
+    // ordinal rule only; CompositeOrdinal pins that rule too).
+    std::string compositePass = "PS_directional_standard";
+    // Pass after which debug views are drawn into the final image (before the UI); "" = in the scene.
+    std::string debugBlitPass = "PS_LensDistortion";
     int tlasSelect = -1;           // -1 auto (largest recent), else n-th distinct TLAS
     bool tlasClone = true;
     int stableFrames = 3;
     bool captureShaders = false;   // write the game's pixel shaders to RTSky_shaders (diagnostics)
+    bool trackShaderDescriptors = true; // texture SRVs / CBVs and their copies (names a pass's inputs)
 
     // [Sky]
     float sunIntensity = 1.0f;
