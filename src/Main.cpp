@@ -14,6 +14,7 @@
 #include "Hooks/D3D12Hooks.h"
 #include "Render/Renderer.h"
 #include "Track/FrameAnalyzer.h"
+#include "Track/ShaderCapture.h"
 #include "Track/TlasTracker.h"
 
 #include "../shaders/RTSkyShared.h"
@@ -48,6 +49,7 @@ void ApplyConfig()
     rtsky::track::Analyzer().Configure(cfg.compositeCandidate, cfg.gbufferOrdinal, cfg.compositeOrdinal, cfg.stableFrames);
     rtsky::track::Tlas().SetCloneEnabled(cfg.tlasClone);
     rtsky::track::Tlas().SetSelect(cfg.tlasSelect);
+    rtsky::track::SetShaderCaptureDirectory(cfg.captureShaders ? g_directory + L"RTSky_shaders" : std::wstring());
 }
 
 void OnKeyboard(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUpNow)
@@ -255,6 +257,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         rtsky::ReloadConfig();
         ApplyConfig();
         rtsky::track::Analyzer().SetAutoDumpPath(g_directory + L"RTSky_frame.log");
+        rtsky::track::Analyzer().SetPipelineNamer(&rtsky::track::PixelShaderHash);
 
         LOG_INFO("RTSky %s - ray-traced sky lighting for GTA V Enhanced", RTSKY_VERSION);
         LOG_INFO("At load: d3d12.dll %s, dxgi.dll %s, sl.interposer.dll %s",
