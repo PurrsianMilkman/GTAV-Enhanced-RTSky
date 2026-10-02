@@ -235,18 +235,46 @@ int main()
         Check(r.hdrOrdinal == 0 && r.hdrMrtBefore == 1, "Composite at hdr#0 after 1 G-buffer pass in the list");
     }
     {
-        Scenario("G-buffer split across two lists with the same ordinal: not unique -> never armed");
+        // GTA V Enhanced (v0.1.2 frame dump): ~15 parallel lists each bind the G-buffer at mrt#0,
+        // one of them followed by other MRT passes; the lighting is in later lists.
+        Scenario("G-buffer recorded in parallel lists (same ordinal): Prepare after every one of them");
+        ID3D12GraphicsCommandList* a = NewList();
+        ID3D12GraphicsCommandList* b = NewList();
+        ID3D12GraphicsCommandList* c = NewList();
+        ID3D12GraphicsCommandList* d = NewList();
+        Frames(60, { { a, "G" }, { b, "G" }, { c, "Gg" }, { d, "HH" } });
+        const InjectionRules r = Analyzer().Rules();
+        Check(r.armed, "armed");
+        Check(r.gbufferEvery && r.gbufferOrdinal == 0, "Prepare after every mrt#0 (every-list mode)");
+        Check(r.hdrOrdinal == 0, "Composite at hdr#0");
+        ListState& sa = *GetListState(a);
+        OnReset(sa, nullptr);
+        Bind(sa, 'G', 500);
+        Check(Analyzer().MatchPrepare(sa, sa.log.back()), "Prepare matches list A's G-buffer");
+        ListState& sc = *GetListState(c);
+        OnReset(sc, nullptr);
+        Bind(sc, 'G', 500);
+        const BindingRecord gc = sc.log.back();
+        Bind(sc, 'g', 20);
+        const BindingRecord gro = sc.log.back();
+        Check(Analyzer().MatchPrepare(sc, gc), "Prepare matches list C's G-buffer");
+        Check(!Analyzer().MatchPrepare(sc, gro), "no Prepare after the read-only-depth re-bind");
+    }
+    {
+        Scenario("look-alike lighting passes at hdr#0 in two lists after the G-buffer: not unique -> never armed");
         Analyzer().SetAutoDumpPath(L"RTSky_frame.log"); // _wfopen is a stub here: nothing is written
         ID3D12GraphicsCommandList* a = NewList();
         ID3D12GraphicsCommandList* b = NewList();
-        Frames(60, { { a, "G" }, { b, "GH" } });
+        ID3D12GraphicsCommandList* c = NewList();
+        Frames(60, { { a, "G" }, { b, "H" }, { c, "H" } });
         const InjectionRules r = Analyzer().Rules();
         Check(!r.armed, "not armed");
         Check(Analyzer().Status().find("not unique") != std::string::npos, "status explains the ambiguity");
-        Check(Analyzer().Status().find("G-buffer mrt#0 x2 per frame") != std::string::npos, "status names the ambiguous pass and its count");
-        Check(Analyzer().Status().find("HDR hdr#") == std::string::npos, "status does not blame the unique HDR pass");
+        Check(Analyzer().Status().find("HDR hdr#0") != std::string::npos && Analyzer().Status().find(" x2 per frame") != std::string::npos,
+              "status names the ambiguous pass and its count");
+        Check(Analyzer().Status().find("G-buffer mrt#") == std::string::npos, "status does not blame the unique G-buffer");
         Check(!Analyzer().AutoDumpTriggered(), "no automatic frame dump within the first second");
-        Frames(240, { { a, "G" }, { b, "GH" } }); // ~4 s more
+        Frames(240, { { a, "G" }, { b, "H" }, { c, "H" } }); // ~4 s more
         Check(Analyzer().AutoDumpTriggered(), "automatic frame dump once ambiguous for 3 s");
         Analyzer().SetAutoDumpPath(L"");
     }

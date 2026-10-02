@@ -162,7 +162,10 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   A rule is a format/size signature plus the per-list ordinal, and it must match exactly one binding
   per frame. If the ordinal alone is ambiguous, the number of G-buffer (or HDR) bindings recorded
   earlier in the same list is added as a discriminator; if that is still ambiguous, nothing is
-  armed. Rules arm after `StableFrames` identical frames and disarm when the structure changes
+  armed. One exception: a G-buffer recorded in parallel lists (GTA V Enhanced: ~15 lists, each
+  binding it first) repeats the same rule in every list. When every depth-writing match lies inside
+  the phase, the Prepare rule arms in *every-list* mode (`gbufferEvery`) and matches each of them
+  (see 5.3). Rules arm after `StableFrames` identical frames and disarm when the structure changes
   (menus, loading: a phase that grows past 64 bindings without lighting). The depth clear value of
   the G-buffer depth (0 or 1) decides reversed or standard Z. Num . dumps one frame.
   `tests/AnalyzerTests.cpp` runs these scenarios against the real sources.
@@ -195,6 +198,11 @@ resource, runs `PrepareCS` (linear view depth plus normals reconstructed from de
 With enhanced barriers the transition waits with `SYNC_ALL` on the access scope the game's last barrier
 opened (or every access the layout allows), and the restore re-opens exactly that scope. Injection is
 skipped while a split barrier on the resource is open.
+Every Prepare recorded since the last Composite belongs to one **group** (one frame): the first one
+samples the camera, claims a constants slot, writes the depth SRV and picks the parity; the others
+(every-list mode) reuse all of it and only record the transitions and the dispatch. Each writes the
+whole linear depth / normal texture from the depth as it stands at that point, so the one the GPU
+runs last, after every G-buffer list, leaves the complete result, whatever the recording order.
 The camera for the frame is chosen here (latency from calibration), together with the 4 latency
 hypotheses for the probe.
 

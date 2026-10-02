@@ -41,7 +41,10 @@ The rules RTSky matches at recording time are "this signature at this ordinal wi
 list" (`mrt#n` / `hdr#n`). A rule is only armed when it matches **exactly one** pass per frame. If the
 same signature appears at the same ordinal in two lists, the dump's `(after N mrt)` / `(after N hdr)`
 counts, the number of G-buffer or HDR passes recorded earlier in the same list, are used to tell
-them apart. If that is still ambiguous, the status says `not unique per frame` and nothing is injected.
+them apart. A G-buffer recorded in several parallel lists (the same `mrt#n` in each, all before the
+lighting) is fine: Prepare then runs after every one of them (`Prepare after every parallel list` in
+the dump header, `every parallel list` in the log). If a pass is still ambiguous, the status says
+`not unique per frame` and nothing is injected.
 The status names the ambiguous pass and how often it appears, for example
 `G-buffer mrt#0 x2 per frame (x2 after 0 hdr in its list)`, and the dump repeats it on its
 `Ambiguous:` line. When this lasts 3 seconds, RTSky writes `RTSky_frame.log` on its own (once per
