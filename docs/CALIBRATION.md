@@ -42,7 +42,10 @@ list" (`mrt#n` / `hdr#n`). A rule is only armed when it matches **exactly one** 
 same signature appears at the same ordinal in two lists, the dump's `(after N mrt)` / `(after N hdr)`
 counts, the number of G-buffer or HDR passes recorded earlier in the same list, are used to tell
 them apart. If that is still ambiguous, the status says `not unique per frame` and nothing is injected.
-Pin an ordinal that is unique in the dump.
+The status names the ambiguous pass and how often it appears, for example
+`G-buffer mrt#0 x2 per frame (x2 after 0 hdr in its list)`, and the dump repeats it on its
+`Ambiguous:` line. When this lasts 3 seconds, RTSky writes `RTSky_frame.log` on its own (once per
+session), so the dump exists even if nobody pressed the key. Pin an ordinal that is unique in the dump.
 
 If the image looks wrong, for example the sky dome, fog or water is darkened (relit too late), or
 nothing changes (relit too early, before the ambient term is added), pick another candidate with

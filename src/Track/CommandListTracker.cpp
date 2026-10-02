@@ -155,6 +155,8 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     preparedSerial = 0;
     compositeConsumedSerial = 0;
     attachments.clear();
+    busyTokens.clear();
+    executed = false;
 }
 
 namespace {

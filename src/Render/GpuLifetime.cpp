@@ -6,6 +6,8 @@
 #include "../Hooks/Bypass.h"
 #include "../Track/CommandListTracker.h"
 
+#include <iterator>
+
 namespace rtsky::render {
 
 using Microsoft::WRL::ComPtr;
@@ -14,6 +16,12 @@ void GpuLifetime::Attach(track::ListState& state, std::shared_ptr<void> object)
 {
     if (object)
         state.attachments.push_back(std::move(object));
+}
+
+void GpuLifetime::AttachBusy(track::ListState& state, std::shared_ptr<void> token)
+{
+    if (token)
+        state.busyTokens.push_back(std::move(token));
 }
 
 void GpuLifetime::Attach(track::ListState& state, const ComPtr<ID3D12Resource>& resource)
@@ -66,10 +74,22 @@ bool GpuLifetime::OnExecuted(ID3D12CommandQueue* queue, UINT count, ID3D12Comman
         // A list that produced a scene TLAS needs a fence value even without attachments (clone
         // disabled): consumers on other queues wait for it.
         needSignal = needSignal || s->tlasProducedValid;
-        if (s->attachments.empty())
-            continue;
+        if (s->executed && (s->injectedPrepare || s->injectedComposite || s->tlasProducedValid))
+        {
+            // Memory stays valid (attachments), but the ring slots this list uses were released after
+            // its first execution and may already hold newer data.
+            RTSKY_LOG_ONCE(log::Level::Warning, "The game re-executes a command list that carries RTSky work; "
+                           "its ring slots may have been reused (please report this)");
+        }
+        s->executed = true;
         // Copy (not move): a closed list may legally be executed more than once.
         batch.insert(batch.end(), s->attachments.begin(), s->attachments.end());
+        // Busy tokens only cover the first execution (see ListState::busyTokens), and so do the
+        // TlasInfo copies, whose holders would otherwise pin the clone slots in the same way.
+        batch.insert(batch.end(), std::make_move_iterator(s->busyTokens.begin()), std::make_move_iterator(s->busyTokens.end()));
+        s->busyTokens.clear();
+        s->tlasProduced.cloneHolder.reset();
+        s->tlasConsumed.cloneHolder.reset();
     }
     if (batch.empty() && !needSignal)
         return false;

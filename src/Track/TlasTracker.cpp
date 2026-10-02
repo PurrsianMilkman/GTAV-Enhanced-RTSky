@@ -15,9 +15,10 @@ using Microsoft::WRL::ComPtr;
 int TlasTracker::AcquireCloneSlot(ID3D12Device5* device, UINT64 size)
 {
     // A slot is free when nothing but the ring references its holder: every list that wrote or reads
-    // the clone keeps a copy of the holder until the GPU has finished with it (GpuLifetime), and the
-    // published / pending TlasInfo copies hold one too. Copies are only made from existing
-    // references, so use_count() == 1 cannot rise concurrently (the ring is only touched under m_lock).
+    // the clone holds a copy as a busy token until the GPU has finished the list's first execution
+    // (GpuLifetime::AttachBusy), and so do the TlasInfo copies of lists not yet submitted. The
+    // publish history holds none. Copies are only made from existing references, so use_count() == 1
+    // cannot rise concurrently (the ring is only touched under m_lock).
     int slot = -1;
     for (uint32_t i = 0; i < kCloneRing; ++i)
     {
@@ -37,9 +38,10 @@ int TlasTracker::AcquireCloneSlot(ID3D12Device5* device, UINT64 size)
     if (!allBusy && m_clones[slot] && m_cloneSizes[slot] >= size)
         return slot;
 
-    // Grow with headroom so that instance-count jitter does not reallocate every frame.
-    const UINT64 needed = std::max(size, allBusy ? m_cloneSizes[slot] : UINT64(0));
-    const UINT64 allocSize = (needed + needed / 4 + 65535) & ~UINT64(65535);
+    // Grow with headroom so that instance-count jitter does not reallocate every frame. Sized from
+    // this build only: sizing from the replaced buffer of a busy slot compounded 25% per all-busy
+    // build and reached multi-GB allocations in game (v0.1.1).
+    const UINT64 allocSize = (size + size / 4 + 65535) & ~UINT64(65535);
 
     D3D12_HEAP_PROPERTIES heap = {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -184,9 +186,11 @@ void TlasTracker::OnBuild(ID3D12GraphicsCommandList4* list, ListState& state,
                 list->CopyRaytracingAccelerationStructure(cloneAddress, dest, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE);
                 list->ResourceBarrier(1, &uav);
 
-                render::Lifetime().Attach(state, m_cloneHolders[slot]);
+                render::Lifetime().AttachBusy(state, m_cloneHolders[slot]);
+                render::Lifetime().Attach(state, m_clones[slot]);
                 info.address = cloneAddress;
                 info.cloneHolder = m_cloneHolders[slot];
+                info.cloneResource = m_clones[slot];
                 info.cloneSlot = slot;
                 info.cloneGen = m_slotGen[slot];
             }
