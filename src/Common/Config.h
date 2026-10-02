@@ -99,6 +99,8 @@ struct Config
     // Pixel-shader entry name of the pass the Composite goes after ("" or "ordinal" = the format /
     // ordinal rule only; CompositeOrdinal pins that rule too).
     std::string compositePass = "PS_directional_standard";
+    // Pass after which debug views are drawn into the final image (before the UI); "" = in the scene.
+    std::string debugBlitPass = "PS_LensDistortion";
     int tlasSelect = -1;           // -1 auto (largest recent), else n-th distinct TLAS
     bool tlasClone = true;
     int stableFrames = 3;

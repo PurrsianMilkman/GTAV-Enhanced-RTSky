@@ -73,6 +73,10 @@ public:
     // Cheap, lock-free on the fast path (thread-local copy refreshed on generation change).
     bool MatchPrepare(const ListState& s, const BindingRecord& r) const;
     bool MatchComposite(const ListState& s, const BindingRecord& r) const;
+    // The final image for the debug blit: a binding whose first draw is the configured pass
+    // (PS_LensDistortion). By name only, independent of the armed rules (Unknown = never).
+    bool MatchDebugBlit(const ListState& s, const BindingRecord& r) const;
+    void SetDebugBlitPass(PassId pass) { m_debugBlitPass.store(static_cast<uint8_t>(pass), std::memory_order_relaxed); }
     InjectionRules Rules() const;
 
     // compositePass: the pass the Composite goes after when pipelines are named (Unknown = the
@@ -136,6 +140,7 @@ private:
     int m_compositeOrdinalOverride = -1;
     int m_stableFrames = 3;
     PassId m_compositePass = PassId::DirectionalStandard;
+    std::atomic<uint8_t> m_debugBlitPass{ static_cast<uint8_t>(PassId::LensDistortion) };
 
     bool m_dumpRequested = false;
     std::wstring m_dumpPath;

@@ -13,6 +13,7 @@
 #include "RTSkyShader_ATrous.h"
 #include "RTSkyShader_Composite.h"
 #include "RTSkyShader_Probe.h"
+#include "RTSkyShader_DebugBlit.h"
 
 namespace rtsky::render {
 
@@ -31,6 +32,7 @@ ShaderBlob GetShader(ShaderId id)
     case ShaderId::ATrous: return { g_ATrous, sizeof(g_ATrous) };
     case ShaderId::Composite: return { g_Composite, sizeof(g_Composite) };
     case ShaderId::Probe: return { g_Probe, sizeof(g_Probe) };
+    case ShaderId::DebugBlit: return { g_DebugBlit, sizeof(g_DebugBlit) };
     default: return {};
     }
 }

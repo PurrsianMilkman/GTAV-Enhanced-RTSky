@@ -260,6 +260,7 @@ bool Config::Load(const std::wstring& path)
     r.Get("detection.compositecandidate", compositeCandidate);
     r.GetAutoInt("detection.compositeordinal", compositeOrdinal, -1);
     r.Get("detection.compositepass", compositePass);
+    r.Get("detection.debugblitpass", debugBlitPass);
     r.GetAutoInt("detection.tlasselect", tlasSelect, -1);
     r.Get("detection.tlasclone", tlasClone);
     r.Get("detection.stableframes", stableFrames);

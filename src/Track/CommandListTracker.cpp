@@ -161,6 +161,7 @@ void ListState::ResetForRecording(ID3D12PipelineState* initialPso)
     stateUnknown = false;
     injectedPrepare = false;
     injectedComposite = false;
+    injectedDebugBlit = false;
     preparedSerial = 0;
     compositeConsumedSerial = 0;
     attachments.clear();

@@ -103,6 +103,7 @@ BoundTarget Target(ID3D12Resource* r, DXGI_FORMAT f)
 // Named (as if the pipelines carried pixel-shader entry names; same formats as 'H'):
 // 'R' the RTGI accumulation (PS_ApplyTemporalAccumulationLitColor_RTIndirectDiffuse),
 // 'D' the deferred lighting (PS_directional_standard), 'J' PS_directional_just_dir_with_shadow,
+// 'L' the final-image pass (PS_LensDistortion),
 // 'N' an unnamed-by-the-table but named pass (sets passMask, firstPassId Unknown).
 void Bind(ListState& s, char kind, uint32_t draws)
 {
@@ -113,6 +114,8 @@ void Bind(ListState& s, char kind, uint32_t draws)
         pass = PassId::RtgiAccumulate;
     else if (kind == 'D')
         pass = PassId::DirectionalStandard;
+    else if (kind == 'L')
+        pass = PassId::LensDistortion;
     else if (kind == 'J')
         pass = PassId::DirectionalJustDir;
     r.firstPassId = pass;
@@ -335,6 +338,21 @@ int main()
         const InjectionRules r = Analyzer().Rules();
         Check(r.armed && !r.compositeByName && r.hdrOrdinal == 1, "Composite at hdr#1 by ordinal");
         Analyzer().Configure(0, -1, -1, 3);
+    }
+    {
+        Scenario("debug blit: matches the PS_LensDistortion binding by name only, whatever the rules");
+        ID3D12GraphicsCommandList* a = NewList();
+        ListState& s = *GetListState(a);
+        OnReset(s, nullptr);
+        Bind(s, 'H', 1);
+        const BindingRecord h = s.log.back();
+        Bind(s, 'L', 1);
+        const BindingRecord l = s.log.back();
+        Check(Analyzer().MatchDebugBlit(s, l), "the PS_LensDistortion binding");
+        Check(!Analyzer().MatchDebugBlit(s, h), "not an unnamed pass of the same list");
+        Analyzer().SetDebugBlitPass(PassId::Unknown);
+        Check(!Analyzer().MatchDebugBlit(s, l), "DebugBlitPass unset: never");
+        Analyzer().SetDebugBlitPass(PassId::LensDistortion);
     }
     {
         Scenario("tracker: the pass of the first draw and the mask of all passes drawn in a binding");

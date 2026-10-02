@@ -18,6 +18,7 @@ enum class ShaderId
     ATrous,
     Composite,
     Probe,
+    DebugBlit,
     Count
 };
 
