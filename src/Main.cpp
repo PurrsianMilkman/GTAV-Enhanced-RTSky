@@ -46,7 +46,8 @@ std::wstring ModuleDirectory(HMODULE module)
 void ApplyConfig()
 {
     const rtsky::Config cfg = rtsky::ConfigSnapshot();
-    rtsky::track::Analyzer().Configure(cfg.compositeCandidate, cfg.gbufferOrdinal, cfg.compositeOrdinal, cfg.stableFrames);
+    rtsky::track::Analyzer().Configure(cfg.compositeCandidate, cfg.gbufferOrdinal, cfg.compositeOrdinal, cfg.stableFrames,
+                                       rtsky::track::PassIdFromEntryName(cfg.compositePass));
     rtsky::track::Tlas().SetCloneEnabled(cfg.tlasClone);
     rtsky::track::Tlas().SetSelect(cfg.tlasSelect);
     rtsky::track::SetShaderCaptureDirectory(cfg.captureShaders ? g_directory + L"RTSky_shaders" : std::wstring());
@@ -257,7 +258,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         rtsky::ReloadConfig();
         ApplyConfig();
         rtsky::track::Analyzer().SetAutoDumpPath(g_directory + L"RTSky_frame.log");
-        rtsky::track::Analyzer().SetPipelineNamer(&rtsky::track::PixelShaderHash);
+        rtsky::track::Analyzer().SetPipelineNamer(&rtsky::track::PipelineLabel);
+        rtsky::track::SetPassResolver(&rtsky::track::PixelShaderPass);
 
         LOG_INFO("RTSky %s - ray-traced sky lighting for GTA V Enhanced", RTSKY_VERSION);
         LOG_INFO("At load: d3d12.dll %s, dxgi.dll %s, sl.interposer.dll %s",

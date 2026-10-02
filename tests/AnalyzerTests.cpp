@@ -14,6 +14,10 @@
 #include <vector>
 
 unsigned long long g_testTick = 1000;
+#ifdef _WIN32
+// Windows build: the analyzer reads this clock instead of GetTickCount64 (RTSKY_TEST_CLOCK).
+extern "C" unsigned long long RTSkyTestTickCount64() { return g_testTick; }
+#endif
 
 namespace rtsky::log {
 void Init(const wchar_t*) {}
@@ -96,10 +100,23 @@ BoundTarget Target(ID3D12Resource* r, DXGI_FORMAT f)
 
 // Pass kinds: 'G' G-buffer (4 x RGBA8 + depth), 'g' the same with read-only depth (decals),
 // 'F' a float MRT pass (3 x RGBA16F + depth), 'H' a float HDR pass (1 x RGBA16F + depth).
+// Named (as if the pipelines carried pixel-shader entry names; same formats as 'H'):
+// 'R' the RTGI accumulation (PS_ApplyTemporalAccumulationLitColor_RTIndirectDiffuse),
+// 'D' the deferred lighting (PS_directional_standard), 'J' PS_directional_just_dir_with_shadow,
+// 'N' an unnamed-by-the-table but named pass (sets passMask, firstPassId Unknown).
 void Bind(ListState& s, char kind, uint32_t draws)
 {
     s.current = BindingRecord{};
     BindingRecord& r = s.current;
+    PassId pass = PassId::Unknown;
+    if (kind == 'R')
+        pass = PassId::RtgiAccumulate;
+    else if (kind == 'D')
+        pass = PassId::DirectionalStandard;
+    else if (kind == 'J')
+        pass = PassId::DirectionalJustDir;
+    r.firstPassId = pass;
+    r.passMask = PassBit(pass) | (kind == 'N' ? PassBit(PassId::GBufferTextured) : 0u);
     if (kind == 'G' || kind == 'g')
     {
         r.rtvCount = 4;
@@ -259,6 +276,80 @@ int main()
         const BindingRecord gro = sc.log.back();
         Check(Analyzer().MatchPrepare(sc, gc), "Prepare matches list C's G-buffer");
         Check(!Analyzer().MatchPrepare(sc, gro), "no Prepare after the read-only-depth re-bind");
+    }
+    // Named passes (v0.2.0): the v0.1.4 frame dump showed the ordinal rule picking the RTGI
+    // accumulation, the first float binding after the G-buffer, instead of the deferred lighting.
+    {
+        Scenario("named: the Composite goes after PS_directional_standard, not the first float pass (RTGI accumulation)");
+        ID3D12GraphicsCommandList* g1 = NewList();
+        ID3D12GraphicsCommandList* g2 = NewList();
+        ID3D12GraphicsCommandList* rt = NewList();
+        ID3D12GraphicsCommandList* lit = NewList();
+        Frames(60, { { g1, "G" }, { g2, "G" }, { rt, "RH" }, { lit, "DHJ" } });
+        const InjectionRules r = Analyzer().Rules();
+        Check(r.armed, "armed");
+        Check(r.gbufferEvery, "Prepare after every parallel G-buffer list");
+        Check(r.compositeByName && r.compositePass == PassId::DirectionalStandard, "Composite armed by name (PS_directional_standard)");
+        ListState& sr = *GetListState(rt);
+        OnReset(sr, nullptr);
+        Bind(sr, 'R', 1);
+        Check(!Analyzer().MatchComposite(sr, sr.log.back()), "no Composite after the RTGI accumulation (same formats)");
+        ListState& sl = *GetListState(lit);
+        OnReset(sl, nullptr);
+        Bind(sl, 'D', 17);
+        const BindingRecord d = sl.log.back();
+        Bind(sl, 'H', 1);
+        const BindingRecord h = sl.log.back();
+        Bind(sl, 'J', 1);
+        const BindingRecord j = sl.log.back();
+        Check(Analyzer().MatchComposite(sl, d), "Composite after the directional binding");
+        Check(!Analyzer().MatchComposite(sl, h) && !Analyzer().MatchComposite(sl, j), "not after the later bindings of the lighting list");
+    }
+    {
+        Scenario("named: PS_directional_standard twice per frame -> not armed, the status names it");
+        ID3D12GraphicsCommandList* g1 = NewList();
+        ID3D12GraphicsCommandList* l1 = NewList();
+        ID3D12GraphicsCommandList* l2 = NewList();
+        Frames(60, { { g1, "G" }, { l1, "D" }, { l2, "D" } });
+        Check(!Analyzer().Rules().armed, "not armed");
+        Check(Analyzer().Status().find("PS_directional_standard x2 per frame") != std::string::npos, "status: PS_directional_standard x2 per frame");
+    }
+    {
+        Scenario("named: the lighting pass disappears (menu) -> disarmed, re-armed when it returns");
+        ID3D12GraphicsCommandList* g1 = NewList();
+        ID3D12GraphicsCommandList* lit = NewList();
+        Frames(60, { { g1, "G" }, { lit, "DH" } });
+        Check(Analyzer().Rules().armed && Analyzer().Rules().compositeByName, "armed by name");
+        Frames(60, { { g1, "G" }, { lit, "NH" } });
+        Check(!Analyzer().Rules().armed, "disarmed while names are seen but PS_directional_standard is not drawn");
+        Check(Analyzer().Status().find("PS_directional_standard not drawn") != std::string::npos, "status names the missing pass");
+        Frames(60, { { g1, "G" }, { lit, "DH" } });
+        Check(Analyzer().Rules().armed && Analyzer().Rules().compositeByName, "re-armed by name");
+    }
+    {
+        Scenario("named: CompositeOrdinal pins the ordinal rule even when names are available");
+        Analyzer().Configure(0, -1, 1, 3);
+        ID3D12GraphicsCommandList* g1 = NewList();
+        ID3D12GraphicsCommandList* lit = NewList();
+        Frames(60, { { g1, "G" }, { lit, "DH" } });
+        const InjectionRules r = Analyzer().Rules();
+        Check(r.armed && !r.compositeByName && r.hdrOrdinal == 1, "Composite at hdr#1 by ordinal");
+        Analyzer().Configure(0, -1, -1, 3);
+    }
+    {
+        Scenario("tracker: the pass of the first draw and the mask of all passes drawn in a binding");
+        SetPassResolver([](const void* pso) { return static_cast<PassId>(reinterpret_cast<uintptr_t>(pso) & 0xFF); });
+        auto fake = [](PassId id) { return reinterpret_cast<ID3D12PipelineState*>(static_cast<uintptr_t>(0x1000) | static_cast<uintptr_t>(id)); };
+        ListState s;
+        s.ResetForRecording(fake(PassId::DirectionalStandard));
+        s.bindingOpen = true;
+        OnDraw(s);
+        OnSetPipelineState(s, fake(PassId::DirectionalScatter));
+        OnDraw(s);
+        Check(s.current.firstPassId == PassId::DirectionalStandard, "first draw: the initial PSO's pass (Reset with a PSO)");
+        Check(s.current.passMask == (PassBit(PassId::DirectionalStandard) | PassBit(PassId::DirectionalScatter)), "mask holds both passes");
+        Check(s.current.psoCount == 2, "both pipelines recorded for the dump");
+        SetPassResolver(nullptr);
     }
     {
         Scenario("look-alike lighting passes at hdr#0 in two lists after the G-buffer: not unique -> never armed");
