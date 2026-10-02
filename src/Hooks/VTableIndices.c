@@ -19,6 +19,12 @@ const unsigned RTSKY_IDX_Device_CopyDescriptors = RTSKY_SLOT(ID3D12Device5, Copy
 const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple = RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple);
 const unsigned RTSKY_IDX_Device_CreateCommandSignature = RTSKY_SLOT(ID3D12Device5, CreateCommandSignature);
 const unsigned RTSKY_IDX_Device_CreateCommandQueue = RTSKY_SLOT(ID3D12Device5, CreateCommandQueue);
+const unsigned RTSKY_IDX_Device_CreateGraphicsPipelineState = RTSKY_SLOT(ID3D12Device5, CreateGraphicsPipelineState);
+const unsigned RTSKY_IDX_Device_CreatePipelineLibrary = RTSKY_SLOT(ID3D12Device5, CreatePipelineLibrary);
+const unsigned RTSKY_IDX_Device_CreatePipelineState = RTSKY_SLOT(ID3D12Device5, CreatePipelineState);
+
+const unsigned RTSKY_IDX_Library_LoadGraphicsPipeline = RTSKY_SLOT(ID3D12PipelineLibrary1, LoadGraphicsPipeline);
+const unsigned RTSKY_IDX_Library_LoadPipeline = RTSKY_SLOT(ID3D12PipelineLibrary1, LoadPipeline);
 
 const unsigned RTSKY_IDX_CL_Close = RTSKY_SLOT(ID3D12GraphicsCommandList7, Close);
 const unsigned RTSKY_IDX_CL_Reset = RTSKY_SLOT(ID3D12GraphicsCommandList7, Reset);
@@ -67,3 +73,4 @@ _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateRenderTargetView) == 20, "unexpec
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple) == 24, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommandSignature) == 41, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommandQueue) == 8, "unexpected vtable layout");
+_Static_assert(RTSKY_SLOT(ID3D12Device5, CreateGraphicsPipelineState) == 10, "unexpected vtable layout");

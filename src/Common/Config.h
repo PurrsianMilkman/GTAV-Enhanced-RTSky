@@ -99,6 +99,7 @@ struct Config
     int tlasSelect = -1;           // -1 auto (largest recent), else n-th distinct TLAS
     bool tlasClone = true;
     int stableFrames = 3;
+    bool captureShaders = false;   // write the game's pixel shaders to RTSky_shaders (diagnostics)
 
     // [Sky]
     float sunIntensity = 1.0f;

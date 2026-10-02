@@ -662,6 +662,17 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
             fprintf(f, " rt0=%p", static_cast<const void*>(r.rtv[0].resource));
         if (r.hasDsv)
             fprintf(f, " ds=%p", static_cast<const void*>(r.dsv.resource));
+        // Pixel shaders it drew with (RTSky_shaders\ps_<hash>.dxil with CaptureShaders=1; ? = unknown)
+        for (uint32_t p = 0; p < r.psoCount; ++p)
+        {
+            const uint64_t hash = m_pipelineNamer != nullptr ? m_pipelineNamer(r.psos[p]) : 0;
+            if (hash != 0)
+                fprintf(f, "%s%016llx", p == 0 ? " ps=" : ",", static_cast<unsigned long long>(hash));
+            else
+                fprintf(f, "%s?", p == 0 ? " ps=" : ",");
+        }
+        if (r.psoCount == BindingRecord::kMaxPsos)
+            fprintf(f, ",...");
         if (rules.armed && PrepareRuleMatches(rules, r))
             fprintf(f, "   <== PREPARE");
         if (rules.armed && r.hdrOrdinal == rules.hdrOrdinal &&

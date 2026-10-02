@@ -77,6 +77,10 @@ public:
     // kAutoDumpAfterMs (the dump is what resolves that, and testers rarely catch it with the key).
     void SetAutoDumpPath(const std::wstring& path);
     bool AutoDumpTriggered() const;
+    // Names a pipeline in the dump by its pixel-shader hash (0 = unknown). Kept as a callback so the
+    // analyzer does not depend on the shader capture (host tests).
+    using PipelineNamer = uint64_t (*)(const void* pso);
+    void SetPipelineNamer(PipelineNamer namer) { m_pipelineNamer = namer; }
 
     // Human readable status line for the log
     std::string Status() const;
@@ -126,6 +130,7 @@ private:
     bool m_dumpRequested = false;
     std::wstring m_dumpPath;
     std::wstring m_autoDumpPath;
+    PipelineNamer m_pipelineNamer = nullptr;
     bool m_autoDumpDone = false;
     ULONGLONG m_ambiguousSince = 0; // tick of the first analysis in the current ambiguous run, 0 = none
     std::string m_ambiguity;        // which pass was ambiguous in the last analysis, and how ("" = none)
