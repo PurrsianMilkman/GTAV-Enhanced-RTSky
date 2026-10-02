@@ -102,8 +102,8 @@ release.
 
 * Real-game validation of the pass detection, the camera / TLAS calibration and the barrier handling
   on NVIDIA, AMD and Intel.
-* A Prepare that works when the G-buffer is split across several command lists at the same ordinal.
-  Today RTSky refuses to arm in that case.
+* A cheaper Prepare for a G-buffer recorded in many parallel lists: today it runs after every one of
+  them (about 15 per frame in GTA V Enhanced) and the last one on the GPU wins.
 * Sampling the game's alpha textures for foliage instead of procedural coverage.
 * Performance: half-resolution tracing, fewer denoiser iterations on low-end GPUs.
 

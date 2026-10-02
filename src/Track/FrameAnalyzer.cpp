@@ -52,6 +52,17 @@ std::string FormatString(DXGI_FORMAT f)
     return buf;
 }
 
+// The Prepare rule without the armed check (shared by recording-time matching and the dump).
+bool PrepareRuleMatches(const InjectionRules& rules, const BindingRecord& r)
+{
+    if (r.mrtOrdinal != rules.gbufferOrdinal || !rules.gbuffer.Matches(r))
+        return false;
+    // Every-list mode: only depth-writing binds (the depth is in DEPTH_WRITE there).
+    if (rules.gbufferEvery)
+        return !r.dsvReadOnlyDepth;
+    return rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore;
+}
+
 thread_local uint64_t t_rulesGeneration = UINT64_MAX;
 thread_local InjectionRules t_rules;
 
@@ -446,6 +457,24 @@ void FrameAnalyzer::Analyze(bool forceDump)
             if (gDiscCount != 1)
                 gDisc = -2;
         }
+        // A G-buffer recorded in parallel lists: the same binding at the same ordinal in several
+        // lists, not told apart by the HDR passes before it. When every depth-writing occurrence lies
+        // inside the G-buffer phase (none after the lighting), Prepare after each of them is safe:
+        // the last one on the GPU sees the complete depth (see the renderer's Prepare groups).
+        // Read-only-depth re-binds are never matched in that mode.
+        bool gEvery = false;
+        if (gDisc == -2 && !g->dsvReadOnlyDepth)
+        {
+            auto writes = [&](const BindingRecord& r) { return r.mrtOrdinal == g->mrtOrdinal && gSig.Matches(r) && !r.dsvReadOnlyDepth; };
+            int inPhase = 0;
+            for (size_t i = phases[k].first; i <= phases[k].last; ++i)
+                inPhase += writes(m_window[i]) ? 1 : 0;
+            if (inPhase == countIn(writes))
+            {
+                gEvery = true;
+                gDisc = -1;
+            }
+        }
         int32_t hDisc = -1;
         const int hCount = countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); });
         int hDiscCount = 0;
@@ -475,8 +504,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
             continue;
         }
 
-        if (gSig == m_candGbuffer && g->mrtOrdinal == m_candGbufferOrdinal && gDisc == m_candGbufferDisc && hSig == m_candHdr &&
-            h->hdrOrdinal == m_candHdrOrdinal && hDisc == m_candHdrDisc)
+        if (gSig == m_candGbuffer && g->mrtOrdinal == m_candGbufferOrdinal && gDisc == m_candGbufferDisc &&
+            gEvery == m_candGbufferEvery && hSig == m_candHdr && h->hdrOrdinal == m_candHdrOrdinal && hDisc == m_candHdrDisc)
         {
             ++m_stableCount;
         }
@@ -485,6 +514,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_candGbuffer = gSig;
             m_candGbufferOrdinal = g->mrtOrdinal;
             m_candGbufferDisc = gDisc;
+            m_candGbufferEvery = gEvery;
             m_candHdr = hSig;
             m_candHdrOrdinal = h->hdrOrdinal;
             m_candHdrDisc = hDisc;
@@ -495,7 +525,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
     if (m_stableCount >= m_stableFrames)
     {
         bool changed = !m_rules.armed || !(m_rules.gbuffer == m_candGbuffer) || m_rules.gbufferOrdinal != m_candGbufferOrdinal ||
-                       m_rules.gbufferHdrBefore != m_candGbufferDisc || !(m_rules.hdr == m_candHdr) ||
+                       m_rules.gbufferHdrBefore != m_candGbufferDisc || m_rules.gbufferEvery != m_candGbufferEvery ||
+                       !(m_rules.hdr == m_candHdr) ||
                        m_rules.hdrOrdinal != m_candHdrOrdinal || m_rules.hdrMrtBefore != m_candHdrDisc ||
                        m_rules.depthClearKnown != clearKnown || (clearKnown && m_rules.depthClearValue != clearValue);
         if (changed)
@@ -504,6 +535,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_rules.gbuffer = m_candGbuffer;
             m_rules.gbufferOrdinal = m_candGbufferOrdinal;
             m_rules.gbufferHdrBefore = m_candGbufferDisc;
+            m_rules.gbufferEvery = m_candGbufferEvery;
             m_rules.hdr = m_candHdr;
             m_rules.hdrOrdinal = m_candHdrOrdinal;
             m_rules.hdrMrtBefore = m_candHdrDisc;
@@ -512,7 +544,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_rules.generation = m_generation.load() + 1;
             m_generation.store(m_rules.generation, std::memory_order_release);
             LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (list ordinal %d%s), depth clear %s%.1f",
-                     m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal, m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
+                     m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal,
+                     m_rules.gbufferEvery ? ", every parallel list" : m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
                      m_rules.hdr.ToString().c_str(), m_rules.hdrOrdinal, m_rules.hdrMrtBefore >= 0 ? ", discriminated" : "",
                      clearKnown ? "" : "unknown ", clearValue);
         }
@@ -591,7 +624,8 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
     }
     fprintf(f, "RTSky frame dump - %zu bindings (execution order)\n", end - begin);
     fprintf(f, "Rules: %s\n", rules.armed ? "armed" : "not armed");
-    fprintf(f, "  G-buffer : %s, list ordinal %d\n", rules.gbuffer.ToString().c_str(), rules.gbufferOrdinal);
+    fprintf(f, "  G-buffer : %s, list ordinal %d%s\n", rules.gbuffer.ToString().c_str(), rules.gbufferOrdinal,
+            rules.gbufferEvery ? ", Prepare after every parallel list" : "");
     fprintf(f, "  Composite: %s, list ordinal %d\n", rules.hdr.ToString().c_str(), rules.hdrOrdinal);
     fprintf(f, "  Depth clear value: %s %.3f\n", rules.depthClearKnown ? "" : "(unknown)", rules.depthClearValue);
     if (!m_ambiguity.empty())
@@ -623,8 +657,12 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
             fprintf(f, " vp=%.0f,%.0f %.0fx%.0f", r.viewport.TopLeftX, r.viewport.TopLeftY, r.viewport.Width, r.viewport.Height);
         if (r.fromRenderPass)
             fprintf(f, " renderpass");
-        if (rules.armed && r.mrtOrdinal == rules.gbufferOrdinal &&
-            (rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore) && rules.gbuffer.Matches(r))
+        // Resource identities: which passes write the same target (e.g. the scene lighting buffer).
+        if (r.rtvCount > 0)
+            fprintf(f, " rt0=%p", static_cast<const void*>(r.rtv[0].resource));
+        if (r.hasDsv)
+            fprintf(f, " ds=%p", static_cast<const void*>(r.dsv.resource));
+        if (rules.armed && PrepareRuleMatches(rules, r))
             fprintf(f, "   <== PREPARE");
         if (rules.armed && r.hdrOrdinal == rules.hdrOrdinal &&
             (rules.hdrMrtBefore < 0 || static_cast<int32_t>(r.mrtBefore) == rules.hdrMrtBefore) && rules.hdr.Matches(r))
@@ -653,8 +691,7 @@ bool FrameAnalyzer::MatchPrepare(const ListState& s, const BindingRecord& r) con
     if (s.type != D3D12_COMMAND_LIST_TYPE_DIRECT || r.mrtOrdinal < 0)
         return false;
     const InjectionRules& rules = CachedRules();
-    return rules.armed && r.mrtOrdinal == rules.gbufferOrdinal &&
-           (rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore) && rules.gbuffer.Matches(r);
+    return rules.armed && PrepareRuleMatches(rules, r);
 }
 
 bool FrameAnalyzer::MatchComposite(const ListState& s, const BindingRecord& r) const
