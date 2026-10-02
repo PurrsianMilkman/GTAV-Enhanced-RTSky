@@ -169,10 +169,24 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   (menus, loading: a phase that grows past 64 bindings without lighting). The depth clear value of
   the G-buffer depth (0 or 1) decides reversed or standard Z. Num . dumps one frame, with the
   resources and pixel-shader hashes of each binding.
-* **ShaderCapture**: the device's `CreateGraphicsPipelineState` / `CreatePipelineState` and the
-  pipeline library's loads (`ID3D12PipelineLibrary1`, patched on creation) note each pipeline with a
-  hash of its pixel shader; bindings remember the first pipelines they drew with. Diagnostics only:
-  `CaptureShaders=1` also writes each distinct shader to `RTSky_shaders\`.
+* **ShaderCapture / PassNames**: the device's `CreateGraphicsPipelineState` / `CreatePipelineState` and
+  the pipeline library's loads (`ID3D12PipelineLibrary1`, patched on creation) note each pipeline with
+  its pixel shader's hash, its **entry name** (read from the DXIL container's PSV0 string table; GTA V
+  Enhanced keeps names such as `PS_directional_standard`), the `PassId` that name stands for, and its
+  root signature. Lists cache the current pipeline's pass at `SetPipelineState`; bindings record the
+  pass of their first draw (`firstPassId`) and of all draws (`passMask`). The analyzer arms the
+  Composite after `[Detection] CompositePass` when pipelines are named (else the ordinal rule), and the
+  debug blit after `DebugBlitPass`. `CaptureShaders=1` also writes each distinct shader to
+  `RTSky_shaders\`.
+* **RootSignatureTracker / BufferTracker / DescriptorTracker** (input census): `CreateRootSignature` blobs
+  are deserialized so a register maps to its root parameter; buffers (committed / placed, incl. the
+  `ID3D12Device10` variants, patched only on devices that implement it) map a GPU address to their
+  resource and heap, dropped by a private-data destruction watch; texture SRVs, CBVs and their
+  CBV_SRV_UAV copies are tracked (`TrackShaderDescriptors`). At the first `PS_directional_standard`
+  draw, `render::OnLightingDraw` resolves the pass's G-buffer / AO / RTGI registers and constant
+  buffers to resources and logs them with the state seen in that list, and reads the sky-ambient
+  constants from the game's upload buffer on the CPU every 10 s (`[GameCB]`). Nothing is bound on the
+  GPU from it: diagnostics for the sky-term replacement.
   `tests/AnalyzerTests.cpp` runs these scenarios against the real sources.
 
 ## 5. Renderer (`src/Render`)

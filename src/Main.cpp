@@ -13,6 +13,7 @@
 #include "Game/ScriptHookV.h"
 #include "Hooks/D3D12Hooks.h"
 #include "Render/Renderer.h"
+#include "Track/DescriptorTracker.h"
 #include "Track/FrameAnalyzer.h"
 #include "Track/ShaderCapture.h"
 #include "Track/TlasTracker.h"
@@ -52,6 +53,7 @@ void ApplyConfig()
     rtsky::track::Tlas().SetCloneEnabled(cfg.tlasClone);
     rtsky::track::Tlas().SetSelect(cfg.tlasSelect);
     rtsky::track::SetShaderCaptureDirectory(cfg.captureShaders ? g_directory + L"RTSky_shaders" : std::wstring());
+    rtsky::track::Descriptors().SetTrackShaderViews(cfg.trackShaderDescriptors);
 }
 
 void OnKeyboard(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUpNow)

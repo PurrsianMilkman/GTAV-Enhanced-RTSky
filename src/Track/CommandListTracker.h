@@ -31,6 +31,8 @@ struct BoundTarget
     UINT height = 0;
     UINT sampleCount = 1;
     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
+    UINT16 arraySize = 1;  // of the resource
+    UINT16 arraySlice = 0; // first slice the view targets (array RTVs: the sky cube faces)
 };
 
 struct BindingRecord

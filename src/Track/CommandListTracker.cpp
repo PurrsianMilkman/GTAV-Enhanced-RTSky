@@ -60,6 +60,8 @@ BoundTarget ToBoundTarget(const ViewInfo& v)
     t.height = v.height;
     t.sampleCount = v.sampleCount;
     t.flags = v.resourceFlags;
+    t.arraySize = v.depthOrArraySize;
+    t.arraySlice = v.firstArraySlice;
     return t;
 }
 

@@ -38,10 +38,27 @@ Press **Num .** to write one frame of submitted passes to `RTSky_frame.log`, in 
 ```
 
 Each binding also lists `rt0=` / `ds=` (the render-target and depth resources: passes that write the
-same `rt0=` accumulate into the same buffer) and `ps=` (hashes of the pixel shaders it drew with, `?`
-for pipelines created before RTSky's hooks). With `[Detection] CaptureShaders=1` set before the game
-starts, every pixel shader is written once to `RTSky_shaders\ps_<hash>.dxil`, so a pass can be read
-with `dxc -dumpbin` instead of guessed from its formats.
+same `rt0=` accumulate into the same buffer), `slice=k/n` for array targets, and `ps=` (the entry names
+of the pixel shaders it drew with, `#<hash>` for a shader without one, `?` for pipelines created before
+RTSky's hooks). The Composite is marked `<== COMPOSITE (named)` when it was armed by `CompositePass`, and
+the final-image pass `<== DEBUG-BLIT`. With `[Detection] CaptureShaders=1` set before the game starts,
+every pixel shader is written once to `RTSky_shaders\ps_<hash>.dxil`, so a pass can be read with
+`dxc -dumpbin` instead of guessed from its formats.
+
+### Reading the input census (v0.2.0)
+
+At the first frame of the deferred lighting pass RTSky logs, once:
+* `[Names]`: pipelines noted / with entry names, and the pipeline count per pass RTSky knows.
+* `[RootSig]`: the lighting pass's root signature, one `pN` per parameter.
+* `[Inputs]`: per input register (G-buffer `t12-t15`, stencil, depth, AO `t10,s1`, RTGI `t24,s1`): the
+  root parameter / table offset, the resource behind it (format, size, flags) and whether a barrier
+  on it was recorded in the lighting list; per constant buffer: root CBV or descriptor, the buffer and
+  heap behind the address.
+* `[SkyCube]`: the game's sky cube (format, size, array size, slices drawn per frame).
+
+and every 10 s `[GameCB]`: the game clock and the sky-ambient constants as the game set them for that
+draw (`Nat0` / `Nat1` / `DirAmb`, the interior / exterior artificial ambient, the global scale `S`, the
+AO power `k`, `reg23`). `not CPU-readable` means the buffer is not an upload heap.
 
 The rules RTSky matches at recording time are "this signature at this ordinal within its command
 list" (`mrt#n` / `hdr#n`). A rule is only armed when it matches **exactly one** pass per frame. If the

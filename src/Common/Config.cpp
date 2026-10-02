@@ -265,6 +265,7 @@ bool Config::Load(const std::wstring& path)
     r.Get("detection.tlasclone", tlasClone);
     r.Get("detection.stableframes", stableFrames);
     r.Get("detection.captureshaders", captureShaders);
+    r.Get("detection.trackshaderdescriptors", trackShaderDescriptors);
 
     r.Get("sky.sunintensity", sunIntensity);
     r.Get("sky.moonintensity", moonIntensity);

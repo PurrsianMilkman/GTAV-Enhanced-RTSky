@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(RTSky VERSION 0.1.4 LANGUAGES C CXX)
+project(RTSky VERSION 0.2.0 LANGUAGES C CXX)
 
 # -------------------------------------------------------------------------------------------------
 # Options
@@ -143,13 +143,16 @@ add_library(RTSky SHARED
     src/Render/Barriers.cpp
     src/Render/Calibration.cpp
     src/Render/GpuLifetime.cpp
+    src/Render/InputCensus.cpp
     src/Render/Renderer.cpp
     src/Render/RtPipeline.cpp
     src/Render/ShaderBlobs.cpp
     src/Track/CommandListTracker.cpp
     src/Track/DescriptorTracker.cpp
     src/Track/FrameAnalyzer.cpp
+    src/Track/BufferTracker.cpp
     src/Track/PassNames.cpp
+    src/Track/RootSignatureTracker.cpp
     src/Track/ShaderCapture.cpp
     src/Track/TlasTracker.cpp
     ${RTSKY_SHADER_HEADERS})
@@ -199,6 +202,12 @@ if(RTSKY_BUILD_TESTS)
                                RTSKY_TEST_CLOCK)
     target_compile_options(RTSkyAnalyzerTests PRIVATE /W4 /wd4100)
     add_test(NAME RTSkyAnalyzerTests COMMAND RTSkyAnalyzerTests)
+    add_executable(RTSkyRootSignatureTests tests/RootSignatureTests.cpp src/Track/RootSignatureTracker.cpp src/Common/Log.cpp)
+    target_include_directories(RTSkyRootSignatureTests BEFORE PRIVATE "${DXH_ROOT}/include/directx" "${DXH_ROOT}/include")
+    target_include_directories(RTSkyRootSignatureTests PRIVATE src)
+    target_compile_definitions(RTSkyRootSignatureTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(RTSkyRootSignatureTests PRIVATE /W4)
+    add_test(NAME RTSkyRootSignatureTests COMMAND RTSkyRootSignatureTests)
 endif()
 
 # Development tool: the pass-name scanner over a directory of captured shaders (not released)

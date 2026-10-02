@@ -24,6 +24,28 @@ inline D3D12_RESOURCE_DESC ResourceDesc(ID3D12Resource* resource)
 #endif
 }
 
+inline D3D12_HEAP_DESC HeapDesc(ID3D12Heap* heap)
+{
+#if defined(_MSC_VER) || !defined(_WIN32)
+    return heap->GetDesc();
+#else
+    D3D12_HEAP_DESC desc;
+    heap->GetDesc(&desc);
+    return desc;
+#endif
+}
+
+inline D3D12_DESCRIPTOR_HEAP_DESC DescriptorHeapDesc(ID3D12DescriptorHeap* heap)
+{
+#if defined(_MSC_VER) || !defined(_WIN32)
+    return heap->GetDesc();
+#else
+    D3D12_DESCRIPTOR_HEAP_DESC desc;
+    heap->GetDesc(&desc);
+    return desc;
+#endif
+}
+
 inline D3D12_CPU_DESCRIPTOR_HANDLE HeapCpuStart(ID3D12DescriptorHeap* heap)
 {
 #if defined(_MSC_VER) || !defined(_WIN32)
