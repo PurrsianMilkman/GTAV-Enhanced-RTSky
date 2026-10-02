@@ -30,6 +30,9 @@ struct TlasInfo
     uint64_t buildSerial = 0;                // increases with every recorded scene TLAS build
     // Keeps the clone buffer alive and marks its ring slot busy while any copy of this exists.
     std::shared_ptr<void> cloneHolder;
+    // The clone buffer itself: keeps its memory valid without marking the slot busy (for lists that
+    // may be re-executed after their busy tokens were released, and for the publish history).
+    Microsoft::WRL::ComPtr<ID3D12Resource> cloneResource;
     int cloneSlot = -1;     // ring slot of the clone (-1: no clone)
     uint64_t cloneGen = 0;  // the slot's generation when the clone was written
     // Submission of the producing list (set by Publish; null queue = not submitted yet).
@@ -77,7 +80,9 @@ public:
     void SetSelect(int select) { m_select = select; }
 
 private:
-    static constexpr uint32_t kCloneRing = 4;
+    // A slot is busy from its build until the consumer's submission has completed, which spans the
+    // game's frames in flight plus async-compute overlap. Clones are a few MB each.
+    static constexpr uint32_t kCloneRing = 8;
 
     // Picks a ring slot that no in-flight or pending list references, (re)allocating its buffer
     // when it is too small or when every slot is busy. Returns the slot or -1.

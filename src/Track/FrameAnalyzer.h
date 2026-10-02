@@ -67,6 +67,10 @@ public:
 
     void Configure(int compositeCandidate, int gbufferOrdinal, int compositeOrdinal, int stableFrames);
     void RequestDump(const std::wstring& path);
+    // Where to write a frame dump on its own, once per session, when the passes stay ambiguous for
+    // kAutoDumpAfterMs (the dump is what resolves that, and testers rarely catch it with the key).
+    void SetAutoDumpPath(const std::wstring& path);
+    bool AutoDumpTriggered() const;
 
     // Human readable status line for the log
     std::string Status() const;
@@ -114,6 +118,10 @@ private:
 
     bool m_dumpRequested = false;
     std::wstring m_dumpPath;
+    std::wstring m_autoDumpPath;
+    bool m_autoDumpDone = false;
+    ULONGLONG m_ambiguousSince = 0; // tick of the first analysis in the current ambiguous run, 0 = none
+    std::string m_ambiguity;        // which pass was ambiguous in the last analysis, and how ("" = none)
     std::string m_status = "waiting for frames";
 };
 

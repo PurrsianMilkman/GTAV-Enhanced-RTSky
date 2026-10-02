@@ -236,12 +236,19 @@ int main()
     }
     {
         Scenario("G-buffer split across two lists with the same ordinal: not unique -> never armed");
+        Analyzer().SetAutoDumpPath(L"RTSky_frame.log"); // _wfopen is a stub here: nothing is written
         ID3D12GraphicsCommandList* a = NewList();
         ID3D12GraphicsCommandList* b = NewList();
         Frames(60, { { a, "G" }, { b, "GH" } });
         const InjectionRules r = Analyzer().Rules();
         Check(!r.armed, "not armed");
         Check(Analyzer().Status().find("not unique") != std::string::npos, "status explains the ambiguity");
+        Check(Analyzer().Status().find("G-buffer mrt#0 x2 per frame") != std::string::npos, "status names the ambiguous pass and its count");
+        Check(Analyzer().Status().find("HDR hdr#") == std::string::npos, "status does not blame the unique HDR pass");
+        Check(!Analyzer().AutoDumpTriggered(), "no automatic frame dump within the first second");
+        Frames(240, { { a, "G" }, { b, "GH" } }); // ~4 s more
+        Check(Analyzer().AutoDumpTriggered(), "automatic frame dump once ambiguous for 3 s");
+        Analyzer().SetAutoDumpPath(L"");
     }
     {
         Scenario("...unless GBufferOrdinal pins a binding that is unique (list B binds it twice)");
