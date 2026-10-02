@@ -16,6 +16,13 @@ extern const unsigned RTSKY_IDX_Device_CopyDescriptors;
 extern const unsigned RTSKY_IDX_Device_CopyDescriptorsSimple;
 extern const unsigned RTSKY_IDX_Device_CreateCommandSignature;
 extern const unsigned RTSKY_IDX_Device_CreateCommandQueue;
+extern const unsigned RTSKY_IDX_Device_CreateGraphicsPipelineState;
+extern const unsigned RTSKY_IDX_Device_CreatePipelineLibrary;
+extern const unsigned RTSKY_IDX_Device_CreatePipelineState;
+
+// ID3D12PipelineLibrary1
+extern const unsigned RTSKY_IDX_Library_LoadGraphicsPipeline;
+extern const unsigned RTSKY_IDX_Library_LoadPipeline;
 
 // ID3D12GraphicsCommandList7
 extern const unsigned RTSKY_IDX_CL_Close;

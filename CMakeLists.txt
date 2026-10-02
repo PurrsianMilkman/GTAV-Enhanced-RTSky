@@ -1,12 +1,16 @@
 cmake_minimum_required(VERSION 3.21)
-project(RTSky VERSION 0.1.3 LANGUAGES C CXX)
+project(RTSky VERSION 0.1.4 LANGUAGES C CXX)
 
 # -------------------------------------------------------------------------------------------------
 # Options
 # -------------------------------------------------------------------------------------------------
 set(RTSKY_DXC "" CACHE FILEPATH "Path to dxc(.exe). Defaults to the Windows SDK / PATH.")
 set(RTSKY_DIRECTX_HEADERS_DIR "" CACHE PATH "Root of a DirectX-Headers checkout (leave empty to fetch v1.619.5).")
-set(RTSKY_VERSION_STRING "${PROJECT_VERSION}-dev" CACHE STRING "Version written to RTSky.log (release tag or commit).")
+set(RTSKY_VERSION_STRING "" CACHE STRING "Version written to RTSky.log (release tag or commit); empty = <project version>-dev.")
+# Not a cached default: a cached "<version>-dev" froze at the first configure and outlived version bumps.
+if(NOT RTSKY_VERSION_STRING)
+    set(RTSKY_VERSION_STRING "${PROJECT_VERSION}-dev")
+endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "RTSky is a 64-bit mod: configure an x64 build.")
@@ -144,6 +148,7 @@ add_library(RTSky SHARED
     src/Track/CommandListTracker.cpp
     src/Track/DescriptorTracker.cpp
     src/Track/FrameAnalyzer.cpp
+    src/Track/ShaderCapture.cpp
     src/Track/TlasTracker.cpp
     ${RTSKY_SHADER_HEADERS})
 add_dependencies(RTSky RTSkyShaders)

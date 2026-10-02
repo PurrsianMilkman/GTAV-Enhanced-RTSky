@@ -37,6 +37,12 @@ Press **Num .** to write one frame of submitted passes to `RTSky_frame.log`, in 
   #5   1 RT [RGBA16F] + D32S8 2560x1440                                           draws 230   hdr#1 dsv ro-depth
 ```
 
+Each binding also lists `rt0=` / `ds=` (the render-target and depth resources: passes that write the
+same `rt0=` accumulate into the same buffer) and `ps=` (hashes of the pixel shaders it drew with, `?`
+for pipelines created before RTSky's hooks). With `[Detection] CaptureShaders=1` set before the game
+starts, every pixel shader is written once to `RTSky_shaders\ps_<hash>.dxil`, so a pass can be read
+with `dxc -dumpbin` instead of guessed from its formats.
+
 The rules RTSky matches at recording time are "this signature at this ordinal within its command
 list" (`mrt#n` / `hdr#n`). A rule is only armed when it matches **exactly one** pass per frame. If the
 same signature appears at the same ordinal in two lists, the dump's `(after N mrt)` / `(after N hdr)`

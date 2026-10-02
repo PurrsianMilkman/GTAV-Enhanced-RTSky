@@ -5,7 +5,7 @@ session (for example Claude Code running locally on the Windows machine that has
 first, then `docs/ARCHITECTURE.md`. It records the goal, where things stand, what was decided and why,
 what is known to be uncertain, and what to do next.
 
-*State as of 2026-10-01: latest release **v0.1.3-alpha** (v0.1.2 and later come from a local session on the
+*State as of 2026-10-01: latest release **v0.1.4-alpha** (v0.1.2 and later come from a local session on the
 owner's machine). The game is at `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V
 Enhanced`; its `RTSky.log` can be read directly.*
 
@@ -59,15 +59,20 @@ stopped.
 | **v0.1.2 in game** | The clone fix holds: 15 allocations in the first second, 640 KB each, then none. Still no visible change: `not unique per frame - G-buffer mrt#0 x12..x18 per frame (x.. after 0 hdr in its list)`. The auto dump showed why: **the G-buffer is recorded in ~15 parallel command lists**, each binding `5 RT [BGRA8 x4, RG16F] + D32S8` at its first binding, all on the direct queue before the lighting lists. Also in the dump: a 1024² six-face cubemap pass (depth clear 1.0), lit into a 2048x1024 R11G11B10F map with mips - very likely GTA's environment / reflection map, which holds the game's real sky (candidate source for the sky colours) |
 | v0.1.3 | Fixes the arming: when the G-buffer rule repeats only inside the G-buffer phase, Prepare goes after **every** such binding (`InjectionRules::gbufferEvery`), and all Prepares recorded since the last Composite form one group (one PendingFrame, parity, camera and constants slot), so the last one on the GPU leaves the complete depth. The dump prints `rt0=` / `ds=` resource pointers to tell which passes write the scene lighting buffer |
 
+| **v0.1.3 in game** | **RTSky runs**: armed in every-list mode (~13.4 Prepares per Composite), DXR pipeline created, calibration passed at once (latency 0, TLAS **camera-relative**, score 0.99-1.00), "ACTIVE - relighting". The owner reports the debug views are **"mixed into the scene"** (not a flat image). The Composite sits on the first full-res float pass after the G-buffer, `2 RT [RGBA16F,R16F] 1707x960`, a 1-draw pass followed by half-res R8 ping-pong passes and more 1-draw RGBA16F passes - most likely an intermediate lighting term (GI / ambient / AO, blurred and combined later), not the scene colour. What it holds decides whether it is the right target, so it is being identified by its shader rather than guessed |
+| v0.1.4 | Diagnostics: pipeline-creation hooks (device `CreateGraphicsPipelineState` / `CreatePipelineState`, `ID3D12PipelineLibrary1` loads) hash each pixel shader; the dump lists `ps=<hash>` per binding, and `[Detection] CaptureShaders=1` writes each shader once to `RTSky_shaders\ps_<hash>.dxil` for `dxc -dumpbin`. The status line counts `pipelines noted`. Also fixed: a cached CMake default froze the local version string at `0.1.1-dev` |
+
 ### The immediate next step
 
-Get the owner's v0.1.3 run, then read `RTSky.log` and `RTSky_frame.log` in the game folder:
+Run v0.1.4 with `CaptureShaders=1` (set before starting the game), press Num . in gameplay, then:
 
-- `Frame analysis: G-buffer = ... every parallel list` and `First Prepare` / `First Composite` lines;
-- which pass the COMPOSITE marker sits on in the dump, and whether its `rt0=` is the buffer the
-  later lighting / transparent / bloom passes use (the scene colour). If not, pick the right one
-  with `CompositeCandidate` (or `CompositeOrdinal`), then make it the default;
-- then the calibration (section 6).
+- disassemble the pixel shaders of the COMPOSITE pass and of the other full-res float passes after
+  the G-buffer (`dxc -dumpbin RTSky_shaders\ps_<hash>.dxil`): which G-buffer channels, textures and
+  constants each reads and what it writes. Find the pass where the sky / ambient term is applied
+  to the scene colour, and the buffer that carries the scene colour onwards (`rt0=`);
+- point the Composite there (`CompositeCandidate` / `CompositeOrdinal`, or a new discriminator if
+  ordinals collide), and adapt `E_keep` if the target holds only an ambient term;
+- `pipelines noted` near 0 means the game creates pipelines some other way: find it before going on.
 
 Then follow section 6.
 

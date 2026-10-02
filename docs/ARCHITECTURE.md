@@ -167,7 +167,12 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   the phase, the Prepare rule arms in *every-list* mode (`gbufferEvery`) and matches each of them
   (see 5.3). Rules arm after `StableFrames` identical frames and disarm when the structure changes
   (menus, loading: a phase that grows past 64 bindings without lighting). The depth clear value of
-  the G-buffer depth (0 or 1) decides reversed or standard Z. Num . dumps one frame.
+  the G-buffer depth (0 or 1) decides reversed or standard Z. Num . dumps one frame, with the
+  resources and pixel-shader hashes of each binding.
+* **ShaderCapture**: the device's `CreateGraphicsPipelineState` / `CreatePipelineState` and the
+  pipeline library's loads (`ID3D12PipelineLibrary1`, patched on creation) note each pipeline with a
+  hash of its pixel shader; bindings remember the first pipelines they drew with. Diagnostics only:
+  `CaptureShaders=1` also writes each distinct shader to `RTSky_shaders\`.
   `tests/AnalyzerTests.cpp` runs these scenarios against the real sources.
 
 ## 5. Renderer (`src/Render`)
