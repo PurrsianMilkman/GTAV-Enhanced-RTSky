@@ -5,7 +5,9 @@ session (for example Claude Code running locally on the Windows machine that has
 first, then `docs/ARCHITECTURE.md`. It records the goal, where things stand, what was decided and why,
 what is known to be uncertain, and what to do next.
 
-*State as of 2026-10-01: `main` at `e266ffd`, latest release **v0.1.1-alpha**.*
+*State as of 2026-10-01: latest release **v0.1.2-alpha** (the first from a local session on the
+owner's machine). The game is at `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V
+Enhanced`; its `RTSky.log` can be read directly.*
 
 ---
 
@@ -25,6 +27,13 @@ baked AO.
 - Story mode only (never GTA Online). License **GPL-3.0** (the owner's choice).
 - Hotkeys on the **numpad**: Num 1 is the activation toggle, and the other numpad keys switch the
   remaining toggles (the owner's request, implemented in v0.1.1).
+- **The sky only** (the owner's clarification, 2026-10-01): *"this shader is meant to ray trace only
+  the sky and nothing else. the sun is already in the global illumination. the sky is not ... i want
+  this mod to use the true colors of what the sky sees."* RTSky must never add or change sun light.
+  Today the sky radiance comes from RTSky's own Hillaire atmosphere, not from the game's sky, which
+  does not meet "the true colors"; sourcing it from the game's real sky (for example the sky lookup
+  its RT reflections / GI use on a miss) is open work. Whether to keep the sun ray (it only weights
+  the ratio, see section 5) is the owner's call, still to be asked.
 
 **How the owner likes to work:** when a PR is green, they said *"Do it yourself"*: merge it and
 publish the release rather than waiting for them. They test in game and report back. Usage limits
@@ -43,15 +52,17 @@ stopped.
 | Reviews | 4 adversarial review rounds (D3D12 sync, hooks/threads, shaders/math, integration, robustness, plus re-reviews of the fixes). Every confirmed finding is fixed except the deliberate exceptions in section 7 |
 | Releases | [v0.1.0-alpha](https://github.com/PurrsianMilkman/GTAV-Enhanced-RTSky/releases/tag/v0.1.0-alpha) and [v0.1.1-alpha](https://github.com/PurrsianMilkman/GTAV-Enhanced-RTSky/releases/tag/v0.1.1-alpha), both pre-releases with `RTSky-<tag>.zip` and its SHA-256 |
 | **In-game result** | **The owner ran v0.1.0-alpha: "the shader does not seem to make any visual changes."** No log was shared, so **the cause is unknown** |
-| Response | v0.1.1-alpha adds an on-screen status display whose first line names the first stage that stops RTSky. It also adds split-screen compare (Num 3), force relight (Num 4) and numpad hotkeys. **The owner has not reported on v0.1.1 yet** |
+| Response | v0.1.1-alpha adds an on-screen status display whose first line names the first stage that stops RTSky. It also adds split-screen compare (Num 3), force relight (Num 4) and numpad hotkeys |
+| **v0.1.1 in game** | `RTSky.log` from the owner's run: hooks, ScriptHookV, hotkeys and TLAS capture all work. Two blockers. **(1)** The analyzer never armed: `G-buffer 5 RT [BGRA8_UNORM x4, RG16F] + D32S8 1707x960: the G-buffer or HDR pass is not unique per frame` for the whole session, so 0 Prepares / 0 Composites and nothing could change on screen. No frame dump was taken. **(2)** TLAS clone buffers grew 25% per build to 4.7 GB each, with 125 failed allocations (E_OUTOFMEMORY): slots were busy until the game reset its lists, so every build took the all-busy path, which sized from the old buffer |
+| v0.1.2 | Fixes (2): busy tokens are released when the GPU finishes a list's first execution (memory kept separately), the ring has 8 slots, and all-busy buffers are sized from the build. The same fix applies to the renderer's injection slots. For (1): the status and the dump name the ambiguous pass and its counts, and RTSky writes `RTSky_frame.log` on its own after 3 s of ambiguity |
 
 ### The immediate next step
 
-Get the owner's v0.1.1 results:
+Get the owner's v0.1.2 run, then read `RTSky.log` and `RTSky_frame.log` in the game folder:
 
-- a screenshot of the status lines (top left);
-- `RTSky.log` and `RTSky_frame.log` (Num . writes the frame dump), both next to the game executable;
-- what the split compare (Num 3, with Num 4 if relighting is held) shows under bridges and trees.
+- the TLAS clone lines must stop after a few allocations (no "all slots in flight" stream);
+- the dump's `Ambiguous:` line names the pass that repeats. Turn the dump into a scenario in
+  `tests/AnalyzerTests.cpp`, then fix the detection (see section 7.1).
 
 Then follow section 6.
 

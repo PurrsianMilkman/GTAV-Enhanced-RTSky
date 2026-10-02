@@ -30,6 +30,9 @@ public:
     void Attach(track::ListState& state, std::shared_ptr<void> object);
     void Attach(track::ListState& state, const Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
     void Attach(track::ListState& state, const Microsoft::WRL::ComPtr<ID3D12DeviceChild>& object);
+    // A ring slot's busy token: held only until the GPU has finished the list's FIRST execution
+    // (see ListState::busyTokens). Whatever memory the slot refers to must also be Attach'ed.
+    void AttachBusy(track::ListState& state, std::shared_ptr<void> token);
 
     // After the game's ExecuteCommandLists was forwarded. Signals the fence on `queue` when any of
     // the lists carries attachments; returns true and the signalled fence / value in that case.

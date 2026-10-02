@@ -124,7 +124,7 @@ forwards straight to the original while it is active, so RTSky's own calls are n
     they are never injection points.
 * **TlasTracker**: every top-level build is inspected. The scene TLAS is the largest one by instance
   count, or the `TlasSelect`-th. It is cloned on the same command list right after its build
-  (`UAV barrier; CopyRaytracingAccelerationStructure(CLONE); UAV barrier`) into a ring of 4 RTSky
+  (`UAV barrier; CopyRaytracingAccelerationStructure(CLONE); UAV barrier`) into a ring of 8 RTSky
   buffers sized by `GetRaytracingAccelerationStructurePrebuildInfo`. RTSky binds the clone, so it never
   depends on how the game buffers or rebuilds its own TLAS. Recording order says nothing about GPU
   order, so:
@@ -148,7 +148,11 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   - if a clone cannot be made (out of memory) the frame is not traced; the game's own TLAS memory is
     never bound, because it may be rebuilt or reallocated while the trace runs;
   - a ring slot is rewritten only when no list that wrote or reads it can still be in flight (each
-    slot has a busy token, carried by every reference); when all slots are busy a new buffer is made.
+    slot has a busy token, carried by every reference). A list's busy tokens leave it at its first
+    submission and are released when the GPU has finished that submission, not when the game next
+    resets the list: games keep closed lists for many frames, and holding the tokens until the reset
+    pinned every slot (v0.1.1 then allocated a new, 25% larger buffer on every build until multi-GB
+    allocations failed). When all slots are busy, a new buffer sized for that build is made.
   Builds of opacity-micromap arrays or BLASes with OMM triangles are detected (see §5.4).
 * **FrameAnalyzer**: consumes binding logs at ExecuteCommandLists, so in GPU order. The G-buffer is the
   MRT signature with the most draws. Consecutive G-buffer bindings not separated by an HDR binding
@@ -218,6 +222,12 @@ relighting runs (debug views still draw).
   and keeps a copy until the fence passes. A list that is reset without being executed drops its
   attachments directly. Slots, sets and buffers recycle themselves when the last reference goes. No
   thread ever waits on the GPU.
+* There are two kinds of attachment. **Memory** (`Attach`: resources, the resource set, the TLAS clone
+  buffer) stays with the list until its reset, because a closed list may legally be executed again.
+  **Busy tokens** (`AttachBusy`: injection slots, TLAS clone ring slots) move into the fence batch of
+  the list's first execution, so a slot is free once the GPU is done with it. A list that carries
+  RTSky work and is executed a second time stays memory-safe, but its slots may already hold newer
+  data; RTSky logs a one-time warning when that happens.
 * Probe readbacks carry a frame stamp written by the GPU, so results from slots that never executed are ignored.
 
 ## 6. Shaders (`shaders/`)

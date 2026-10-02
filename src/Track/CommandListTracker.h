@@ -164,6 +164,12 @@ struct ListState
     // Objects referenced by commands RTSky recorded into this list; kept alive until the GPU has
     // finished every execution of the list (see render::GpuLifetime).
     std::vector<std::shared_ptr<void>> attachments;
+    // Busy tokens of ring slots this list uses (TLAS clones, injection slots). They leave the list
+    // at its first execution and are released when the GPU has finished it, so a slot is free again
+    // once the GPU is done rather than when the game next resets this list (which can be many
+    // frames later and pinned every slot). Memory stays valid through `attachments`.
+    std::vector<std::shared_ptr<void>> busyTokens;
+    bool executed = false; // submitted at least once since the last reset
 
     void ResetForRecording(ID3D12PipelineState* initialPso);
 };

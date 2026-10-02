@@ -161,6 +161,21 @@ void FrameAnalyzer::RequestDump(const std::wstring& path)
     ReleaseSRWLockExclusive(&m_lock);
 }
 
+void FrameAnalyzer::SetAutoDumpPath(const std::wstring& path)
+{
+    AcquireSRWLockExclusive(&m_lock);
+    m_autoDumpPath = path;
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+bool FrameAnalyzer::AutoDumpTriggered() const
+{
+    AcquireSRWLockShared(&m_lock);
+    const bool done = m_autoDumpDone;
+    ReleaseSRWLockShared(&m_lock);
+    return done;
+}
+
 void FrameAnalyzer::OnExecute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
     bool analyze = false;
@@ -207,6 +222,8 @@ void FrameAnalyzer::OnExecute(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
 
 // More G-buffer bindings than this in one phase: no HDR pass separates the frames any more.
 static constexpr uint32_t kStalledPhaseBindings = 64;
+// Ambiguous this long without a break: not a loading transient, write the frame dump on its own.
+static constexpr ULONGLONG kAutoDumpAfterMs = 3000;
 
 void FrameAnalyzer::Analyze(bool forceDump)
 {
@@ -360,6 +377,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
     //    recorded earlier in the same list is added as a discriminator.
     int framesWithoutHdr = 0;
     int ambiguousFrames = 0;
+    m_ambiguity.clear();
     for (size_t k = 0; k + 1 < phases.size(); ++k)
     {
         const size_t frameBegin = phases[k].first;
@@ -417,28 +435,43 @@ void FrameAnalyzer::Analyze(bool forceDump)
             return n;
         };
         int32_t gDisc = -1;
-        if (countIn([&](const BindingRecord& r) { return r.mrtOrdinal == g->mrtOrdinal && gSig.Matches(r); }) != 1)
+        const int gCount = countIn([&](const BindingRecord& r) { return r.mrtOrdinal == g->mrtOrdinal && gSig.Matches(r); });
+        int gDiscCount = 0;
+        if (gCount != 1)
         {
             gDisc = static_cast<int32_t>(g->hdrBefore);
-            if (countIn([&](const BindingRecord& r) {
-                    return r.mrtOrdinal == g->mrtOrdinal && static_cast<int32_t>(r.hdrBefore) == gDisc && gSig.Matches(r);
-                }) != 1)
+            gDiscCount = countIn([&](const BindingRecord& r) {
+                return r.mrtOrdinal == g->mrtOrdinal && static_cast<int32_t>(r.hdrBefore) == gDisc && gSig.Matches(r);
+            });
+            if (gDiscCount != 1)
                 gDisc = -2;
         }
         int32_t hDisc = -1;
-        if (countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); }) != 1)
+        const int hCount = countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); });
+        int hDiscCount = 0;
+        if (hCount != 1)
         {
             hDisc = static_cast<int32_t>(h->mrtBefore);
-            if (countIn([&](const BindingRecord& r) {
-                    return r.hdrOrdinal == h->hdrOrdinal && static_cast<int32_t>(r.mrtBefore) == hDisc && hSig.Matches(r);
-                }) != 1)
+            hDiscCount = countIn([&](const BindingRecord& r) {
+                return r.hdrOrdinal == h->hdrOrdinal && static_cast<int32_t>(r.mrtBefore) == hDisc && hSig.Matches(r);
+            });
+            if (hDiscCount != 1)
                 hDisc = -2;
         }
         if (gDisc == -2 || hDisc == -2)
         {
             // No rule identifies the pass uniquely: injecting could hit the wrong pass (or twice).
+            // Name the pass and the counts, so the status and the dump say which rule failed.
             ++ambiguousFrames;
             m_stableCount = 0;
+            m_ambiguity.clear();
+            if (gDisc == -2)
+                m_ambiguity = "G-buffer mrt#" + std::to_string(g->mrtOrdinal) + " x" + std::to_string(gCount) + " per frame (x" +
+                              std::to_string(gDiscCount) + " after " + std::to_string(g->hdrBefore) + " hdr in its list)";
+            if (hDisc == -2)
+                m_ambiguity += std::string(m_ambiguity.empty() ? "" : "; ") + "HDR hdr#" + std::to_string(h->hdrOrdinal) + " " +
+                               hSig.ToString() + " x" + std::to_string(hCount) + " per frame (x" + std::to_string(hDiscCount) +
+                               " after " + std::to_string(h->mrtBefore) + " mrt in its list)";
             continue;
         }
 
@@ -499,15 +532,36 @@ void FrameAnalyzer::Analyze(bool forceDump)
     else if (!m_rules.armed)
     {
         if (ambiguousFrames > 0)
-            m_status = "G-buffer " + best->sig.ToString() + ": the G-buffer or HDR pass is not unique per frame "
-                       "(press the frame-dump key and see docs/CALIBRATION.md)";
+            m_status = "G-buffer " + best->sig.ToString() + ": not unique per frame - " + m_ambiguity +
+                       (m_autoDumpDone ? " (frame dump written, see docs/CALIBRATION.md)" : " (see docs/CALIBRATION.md)");
         else
             m_status = "G-buffer " + best->sig.ToString() + ", HDR pass " +
                        (m_stableCount > 0 ? "found, stabilising (if this persists, pin GBufferOrdinal from the frame dump)"
                                           : "not found (check CompositeCandidate)");
     }
 
-    if (m_dumpRequested || forceDump)
+    // Persistently ambiguous: write the dump once on its own (into the manual dump's file).
+    bool autoDump = false;
+    if (!m_rules.armed && ambiguousFrames > 0)
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (m_ambiguousSince == 0)
+            m_ambiguousSince = now;
+        if (!m_autoDumpDone && !m_autoDumpPath.empty() && now - m_ambiguousSince >= kAutoDumpAfterMs)
+        {
+            autoDump = true;
+            m_autoDumpDone = true;
+            if (!m_dumpRequested)
+                m_dumpPath = m_autoDumpPath;
+            LOG_INFO("Frame analysis: the passes stay ambiguous (%s); writing the frame dump automatically", m_ambiguity.c_str());
+        }
+    }
+    else
+    {
+        m_ambiguousSince = 0;
+    }
+
+    if (m_dumpRequested || forceDump || autoDump)
         WriteDump(phases[phases.size() - 2].first, phases.back().first, m_rules);
 
     // Keep the incomplete tail (the last phase and what follows) for the next analysis.
@@ -539,7 +593,10 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
     fprintf(f, "Rules: %s\n", rules.armed ? "armed" : "not armed");
     fprintf(f, "  G-buffer : %s, list ordinal %d\n", rules.gbuffer.ToString().c_str(), rules.gbufferOrdinal);
     fprintf(f, "  Composite: %s, list ordinal %d\n", rules.hdr.ToString().c_str(), rules.hdrOrdinal);
-    fprintf(f, "  Depth clear value: %s %.3f\n\n", rules.depthClearKnown ? "" : "(unknown)", rules.depthClearValue);
+    fprintf(f, "  Depth clear value: %s %.3f\n", rules.depthClearKnown ? "" : "(unknown)", rules.depthClearValue);
+    if (!m_ambiguity.empty())
+        fprintf(f, "Ambiguous (why the rules are not armed): %s\n", m_ambiguity.c_str());
+    fprintf(f, "\n");
 
     size_t markerIndex = 0;
     for (size_t i = begin; i < end && i < m_window.size(); ++i)

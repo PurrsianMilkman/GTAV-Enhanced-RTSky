@@ -126,7 +126,8 @@ See [docs/CALIBRATION.md](docs/CALIBRATION.md). In short:
 * *Wrong pass relit* (fog or sky darkened, or nothing changes): use the frame dump and
   `CompositeCandidate`.
 * *"not unique per frame"*: the G-buffer or lighting pass appears more than once per frame in a way
-  RTSky cannot tell apart, so it stays off rather than relight the wrong pass. Send the frame dump.
+  RTSky cannot tell apart, so it stays off rather than relight the wrong pass. After 3 seconds of this,
+  RTSky writes `RTSky_frame.log` on its own; send it.
 * *"paired late"* counting up in the status line: the game records its lighting before its
   G-buffer, so the sky shadows lag one frame.
 * *"the game uses opacity micromaps"*: set `Latency` and `TlasSpace` by hand (calibration cannot run).

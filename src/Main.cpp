@@ -254,6 +254,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         rtsky::SetConfigPath(g_directory + L"RTSky.ini");
         rtsky::ReloadConfig();
         ApplyConfig();
+        rtsky::track::Analyzer().SetAutoDumpPath(g_directory + L"RTSky_frame.log");
 
         LOG_INFO("RTSky %s - ray-traced sky lighting for GTA V Enhanced", RTSKY_VERSION);
         LOG_INFO("At load: d3d12.dll %s, dxgi.dll %s, sl.interposer.dll %s",

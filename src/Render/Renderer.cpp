@@ -1272,7 +1272,7 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
         RestoreGame(list, depth, Usage::ComputeRead, depthState, true);
     track::RestoreState(list, state);
 
-    Lifetime().Attach(state, slotHandle);
+    Lifetime().AttachBusy(state, slotHandle);
     Lifetime().Attach(state, std::static_pointer_cast<void>(m_set));
     f.recordedAt = GetTickCount64();
     m_pending = f;
@@ -1536,9 +1536,10 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     {
         own.Rest(list);
         track::RestoreState(list, state);
-        Lifetime().Attach(state, slotHandle);
+        Lifetime().AttachBusy(state, slotHandle);
         Lifetime().Attach(state, std::static_pointer_cast<void>(f.set));
-        Lifetime().Attach(state, tlas.cloneHolder);
+        Lifetime().AttachBusy(state, tlas.cloneHolder);
+        Lifetime().Attach(state, tlas.cloneResource);
         if (!tlasFromThisList)
         {
             state.tlasConsumed = tlas;
@@ -1596,9 +1597,10 @@ void RendererImpl::Composite(ID3D12GraphicsCommandList* list, ListState& state, 
     track::RestoreState(list, state);
 
     // Keep everything the GPU will touch alive until this list has executed.
-    Lifetime().Attach(state, slotHandle);
+    Lifetime().AttachBusy(state, slotHandle);
     Lifetime().Attach(state, std::static_pointer_cast<void>(f.set));
-    Lifetime().Attach(state, tlas.cloneHolder);
+    Lifetime().AttachBusy(state, tlas.cloneHolder);
+    Lifetime().Attach(state, tlas.cloneResource);
     if (!tlasFromThisList)
     {
         state.tlasConsumed = tlas;
@@ -1653,7 +1655,9 @@ void RendererImpl::OnSubmit(ID3D12CommandQueue* queue, UINT count, ID3D12Command
             if (best.buildSerial != s->tlasConsumed.buildSerial && best.address != 0)
             {
                 TlasSrv(static_cast<uint32_t>(s->tlasDescriptor), best.address);
-                Lifetime().Attach(*s, best.cloneHolder); // copied into this submission's lifetime batch
+                // Moved into this submission's lifetime batch by GpuLifetime::OnExecuted (called next).
+                Lifetime().AttachBusy(*s, best.cloneHolder);
+                Lifetime().Attach(*s, best.cloneResource);
                 s->tlasConsumed = best;
                 m_lateTlas.fetch_add(1, std::memory_order_relaxed);
             }
