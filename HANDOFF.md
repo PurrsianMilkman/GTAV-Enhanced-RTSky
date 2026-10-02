@@ -5,7 +5,7 @@ session (for example Claude Code running locally on the Windows machine that has
 first, then `docs/ARCHITECTURE.md`. It records the goal, where things stand, what was decided and why,
 what is known to be uncertain, and what to do next.
 
-*State as of 2026-10-01: latest release **v0.1.2-alpha** (the first from a local session on the
+*State as of 2026-10-01: latest release **v0.1.3-alpha** (v0.1.2 and later come from a local session on the
 owner's machine). The game is at `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V
 Enhanced`; its `RTSky.log` can be read directly.*
 
@@ -56,13 +56,18 @@ stopped.
 | **v0.1.1 in game** | `RTSky.log` from the owner's run: hooks, ScriptHookV, hotkeys and TLAS capture all work. Two blockers. **(1)** The analyzer never armed: `G-buffer 5 RT [BGRA8_UNORM x4, RG16F] + D32S8 1707x960: the G-buffer or HDR pass is not unique per frame` for the whole session, so 0 Prepares / 0 Composites and nothing could change on screen. No frame dump was taken. **(2)** TLAS clone buffers grew 25% per build to 4.7 GB each, with 125 failed allocations (E_OUTOFMEMORY): slots were busy until the game reset its lists, so every build took the all-busy path, which sized from the old buffer |
 | v0.1.2 | Fixes (2): busy tokens are released when the GPU finishes a list's first execution (memory kept separately), the ring has 8 slots, and all-busy buffers are sized from the build. The same fix applies to the renderer's injection slots. For (1): the status and the dump name the ambiguous pass and its counts, and RTSky writes `RTSky_frame.log` on its own after 3 s of ambiguity |
 
+| **v0.1.2 in game** | The clone fix holds: 15 allocations in the first second, 640 KB each, then none. Still no visible change: `not unique per frame - G-buffer mrt#0 x12..x18 per frame (x.. after 0 hdr in its list)`. The auto dump showed why: **the G-buffer is recorded in ~15 parallel command lists**, each binding `5 RT [BGRA8 x4, RG16F] + D32S8` at its first binding, all on the direct queue before the lighting lists. Also in the dump: a 1024² six-face cubemap pass (depth clear 1.0), lit into a 2048x1024 R11G11B10F map with mips - very likely GTA's environment / reflection map, which holds the game's real sky (candidate source for the sky colours) |
+| v0.1.3 | Fixes the arming: when the G-buffer rule repeats only inside the G-buffer phase, Prepare goes after **every** such binding (`InjectionRules::gbufferEvery`), and all Prepares recorded since the last Composite form one group (one PendingFrame, parity, camera and constants slot), so the last one on the GPU leaves the complete depth. The dump prints `rt0=` / `ds=` resource pointers to tell which passes write the scene lighting buffer |
+
 ### The immediate next step
 
-Get the owner's v0.1.2 run, then read `RTSky.log` and `RTSky_frame.log` in the game folder:
+Get the owner's v0.1.3 run, then read `RTSky.log` and `RTSky_frame.log` in the game folder:
 
-- the TLAS clone lines must stop after a few allocations (no "all slots in flight" stream);
-- the dump's `Ambiguous:` line names the pass that repeats. Turn the dump into a scenario in
-  `tests/AnalyzerTests.cpp`, then fix the detection (see section 7.1).
+- `Frame analysis: G-buffer = ... every parallel list` and `First Prepare` / `First Composite` lines;
+- which pass the COMPOSITE marker sits on in the dump, and whether its `rt0=` is the buffer the
+  later lighting / transparent / bloom passes use (the scene colour). If not, pick the right one
+  with `CompositeCandidate` (or `CompositeOrdinal`), then make it the default;
+- then the calibration (section 6).
 
 Then follow section 6.
 
@@ -268,10 +273,13 @@ Calibration details:
 
 ## 7. Known limitations and deliberate decisions
 
-1. **G-buffer split across several command lists at the same ordinal**, with no discriminator: the
-   analyzer **refuses to arm** rather than risk injecting into the wrong pass. Idea, if real frame
-   dumps show this: inject Prepare after every matching binding in the phase, and share one
-   PendingFrame and parity per frame so the last one on the GPU wins.
+1. **G-buffer split across several command lists at the same ordinal** (GTA V Enhanced does this,
+   ~15 lists): since v0.1.3 Prepare runs after every such binding when all of them lie inside the
+   G-buffer phase, as one group per frame. Costs: one Prepare (a full-screen compute pass plus two
+   depth transitions) per list, ~15 per frame. Groups are delimited by the Composite in recording
+   order, so a game that records the next frame's G-buffer lists before this frame's lighting list
+   would mix two frames in one group (the `paired late` counter shows it). If the rule also matches
+   a depth-writing binding outside the phase, the analyzer still refuses to arm.
 2. **Enhanced barriers ending in `NO_ACCESS`** are not taken over. The restore could not order the
    game's next access after RTSky's writes.
 3. **TLAS built on async compute** that has not finished when the composite is submitted: the

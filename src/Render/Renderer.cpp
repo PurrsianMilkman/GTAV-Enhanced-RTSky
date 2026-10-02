@@ -206,6 +206,10 @@ public:
     bool EnsureReady(ID3D12GraphicsCommandList* list);
     void Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
     void Composite(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg);
+    // m_lock held. Starts a Prepare group: camera, PendingFrame, constants slot, depth SRV. Returns
+    // false (with m_lastSkip set) when this frame cannot be prepared.
+    bool BeginPrepareGroup(const BindingRecord& record, ID3D12Resource* depth, DXGI_FORMAT srvFormat, UINT vpX, UINT vpY, UINT w,
+                           UINT h, const Config& cfg);
     std::string Status();
     std::vector<std::string> OverlayLines(const Config& cfg);
     void ResetCalibration() { m_calibration.Reset(); }
@@ -318,6 +322,13 @@ private:
     std::shared_ptr<ResourceSet> m_set;
     std::shared_ptr<SceneCopy> m_sceneCopy;
     PendingFrame m_pending;
+    // Prepare group: every Prepare recorded since the last Composite belongs to one frame. The
+    // G-buffer can be recorded in several parallel lists with a Prepare each (gbufferEvery); they
+    // share m_pending (parity, camera), this constants slot and its depth SRV, so whichever runs last
+    // on the GPU - after all G-buffer draws - leaves the complete depth, whatever the recording order.
+    std::shared_ptr<void> m_groupSlotHandle;
+    uint32_t m_groupSlot = 0;
+    ComPtr<ID3D12Resource> m_groupDepth; // the depth the slot's SRV views (kept alive with it)
     uint64_t m_prepareSerial = 0;
     uint64_t m_lastCompositePrepareSerial = 0;
     CameraFrame m_lastCompositeCamera;
@@ -1083,12 +1094,6 @@ static bool StateFromObserved(const track::ObservedState& o, GameResourceState* 
 // -------------------------------------------------------------------------------------------------
 void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, const BindingRecord& record, const Config& cfg)
 {
-    // Whatever happens below, the previous frame's Prepare must not be paired with this frame's
-    // Composite (its depth and camera are a frame old).
-    AcquireSRWLockExclusive(&m_lock);
-    m_pending.valid = false;
-    ReleaseSRWLockExclusive(&m_lock);
-
     ID3D12Resource* depth = record.dsv.resource;
     if (!record.hasDsv || depth == nullptr)
         return;
@@ -1174,6 +1179,63 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
         m_resetRequested.store(true);
     }
 
+    // Join the open Prepare group (another parallel G-buffer list of this frame), or start one. A
+    // group is open until a Composite consumes it; a different depth, size or set starts a new one.
+    const bool join = m_pending.valid && m_groupSlotHandle && m_pending.prepareSerial != m_lastCompositePrepareSerial &&
+                      m_groupDepth.Get() == depth && m_pending.set == m_set && m_pending.traceW == w && m_pending.traceH == h &&
+                      m_pending.depthVpX == float(vpX) && m_pending.depthVpY == float(vpY) &&
+                      GetTickCount64() - m_pending.recordedAt <= 250;
+    if (!join && !BeginPrepareGroup(record, depth, srvFormat, vpX, vpY, w, h, cfg))
+    {
+        ReleaseSRWLockExclusive(&m_lock);
+        return;
+    }
+    const PendingFrame f = m_pending;
+    const uint32_t slot = m_groupSlot;
+    const std::shared_ptr<void> slotHandle = m_groupSlotHandle;
+    const uint32_t slotBase = SlotTableBase(slot);
+
+    // --- record ---
+    const bool alreadyReadable = !depthState.enhanced && depthState.usage == Usage::ComputeRead &&
+                                 (depthState.legacyState & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != 0;
+    if (!alreadyReadable)
+        TransitionGame(list, depth, depthState, Usage::ComputeRead, true);
+
+    OwnTracker own;
+    const ResourceSet& set = *m_set;
+    own.Use(set.linearDepth[f.parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    own.Use(set.normal[f.parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    own.Flush(list);
+
+    BeginPasses(list, slot, kTlasNull);
+    Run(list, Pso::Prepare, slotBase, SetTableBase(set, ST_PrepareUav + f.parity) + kTableSrv, DivUp(w, RTSKY_GROUP_SIZE),
+        DivUp(h, RTSKY_GROUP_SIZE), 1);
+
+    own.Rest(list);
+    if (!alreadyReadable)
+        RestoreGame(list, depth, Usage::ComputeRead, depthState, true);
+    track::RestoreState(list, state);
+
+    Lifetime().AttachBusy(state, slotHandle);
+    Lifetime().Attach(state, std::static_pointer_cast<void>(f.set));
+    Lifetime().Attach(state, m_groupDepth);
+    state.preparedSerial = f.prepareSerial;
+    ++m_prepares;
+    if (m_prepares.load() == 1)
+        LOG_INFO("First Prepare injection recorded (%ux%u, depth format %d, %s barriers)", w, h,
+                 static_cast<int>(record.dsv.resourceFormat), depthState.enhanced ? "enhanced" : "legacy");
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+bool RendererImpl::BeginPrepareGroup(const BindingRecord& record, ID3D12Resource* depth, DXGI_FORMAT srvFormat, UINT vpX, UINT vpY,
+                                     UINT w, UINT h, const Config& cfg)
+{
+    // Whatever happens below, the previous frame's Prepare must not be paired with this frame's
+    // Composite (its depth and camera are a frame old).
+    m_pending.valid = false;
+    m_groupSlotHandle.reset();
+    m_groupDepth.Reset();
+
     // Camera for this frame + calibration hypotheses
     // Pinned values restrict the calibration's search to their row / column (with the same
     // hysteresis as the automatic choice).
@@ -1185,8 +1247,7 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     if (!game::Game().GetCamera(static_cast<uint32_t>(latency), &sample))
     {
         m_lastSkip = "no camera data from ScriptHookV yet";
-        ReleaseSRWLockExclusive(&m_lock);
-        return;
+        return false;
     }
     f.camera = MakeCamera(sample, aspect, cfg.fovScale);
     f.latencyUsed = latency;
@@ -1223,6 +1284,7 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     f.depthVpY = float(vpY);
     f.depthTexW = record.dsv.width;
     f.depthTexH = record.dsv.height;
+    f.recordedAt = GetTickCount64();
     f.valid = true;
 
     uint32_t slot = 0;
@@ -1230,8 +1292,7 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     if (!slotHandle)
     {
         m_lastSkip = "all injection slots in flight";
-        ReleaseSRWLockExclusive(&m_lock);
-        return;
+        return false;
     }
 
     gpu::FrameConstants* fc = reinterpret_cast<gpu::FrameConstants*>(m_constantsMapped + SIZE_T(slot) * kConstantSlotSize);
@@ -1239,8 +1300,7 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
     FillConstants(local, f, nullptr, cfg, false, 0, f.camera.position, 0, 0, w, h, false);
     std::memcpy(fc, &local, sizeof(local));
 
-    // Game depth SRV in this slot's table
-    const uint32_t slotBase = SlotTableBase(slot);
+    // Game depth SRV in this slot's table (shared by every Prepare of the group: same depth)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
         d.Format = srvFormat;
@@ -1248,40 +1308,14 @@ void RendererImpl::Prepare(ID3D12GraphicsCommandList* list, ListState& state, co
         d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         d.Texture2D.MipLevels = 1;
         d.Texture2D.PlaneSlice = 0;
-        m_device->CreateShaderResourceView(depth, &d, Cpu(slotBase));
+        m_device->CreateShaderResourceView(depth, &d, Cpu(SlotTableBase(slot)));
     }
 
-    // --- record ---
-    const bool alreadyReadable = !depthState.enhanced && depthState.usage == Usage::ComputeRead &&
-                                 (depthState.legacyState & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != 0;
-    if (!alreadyReadable)
-        TransitionGame(list, depth, depthState, Usage::ComputeRead, true);
-
-    OwnTracker own;
-    const ResourceSet& set = *m_set;
-    own.Use(set.linearDepth[f.parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    own.Use(set.normal[f.parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    own.Flush(list);
-
-    BeginPasses(list, slot, kTlasNull);
-    Run(list, Pso::Prepare, slotBase, SetTableBase(set, ST_PrepareUav + f.parity) + kTableSrv, DivUp(w, RTSKY_GROUP_SIZE),
-        DivUp(h, RTSKY_GROUP_SIZE), 1);
-
-    own.Rest(list);
-    if (!alreadyReadable)
-        RestoreGame(list, depth, Usage::ComputeRead, depthState, true);
-    track::RestoreState(list, state);
-
-    Lifetime().AttachBusy(state, slotHandle);
-    Lifetime().Attach(state, std::static_pointer_cast<void>(m_set));
-    f.recordedAt = GetTickCount64();
     m_pending = f;
-    state.preparedSerial = f.prepareSerial;
-    ++m_prepares;
-    if (m_prepares.load() == 1)
-        LOG_INFO("First Prepare injection recorded (%ux%u, depth format %d, %s barriers)", w, h,
-                 static_cast<int>(record.dsv.resourceFormat), depthState.enhanced ? "enhanced" : "legacy");
-    ReleaseSRWLockExclusive(&m_lock);
+    m_groupSlot = slot;
+    m_groupSlotHandle = std::move(slotHandle);
+    m_groupDepth = depth;
+    return true;
 }
 
 // -------------------------------------------------------------------------------------------------

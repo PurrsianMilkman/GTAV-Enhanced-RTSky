@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(RTSky VERSION 0.1.2 LANGUAGES C CXX)
+project(RTSky VERSION 0.1.3 LANGUAGES C CXX)
 
 # -------------------------------------------------------------------------------------------------
 # Options
