@@ -48,6 +48,7 @@ void ApplyConfig()
     const rtsky::Config cfg = rtsky::ConfigSnapshot();
     rtsky::track::Analyzer().Configure(cfg.compositeCandidate, cfg.gbufferOrdinal, cfg.compositeOrdinal, cfg.stableFrames,
                                        rtsky::track::PassIdFromEntryName(cfg.compositePass));
+    rtsky::track::Analyzer().SetDebugBlitPass(rtsky::track::PassIdFromEntryName(cfg.debugBlitPass));
     rtsky::track::Tlas().SetCloneEnabled(cfg.tlasClone);
     rtsky::track::Tlas().SetSelect(cfg.tlasSelect);
     rtsky::track::SetShaderCaptureDirectory(cfg.captureShaders ? g_directory + L"RTSky_shaders" : std::wstring());

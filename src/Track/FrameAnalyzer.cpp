@@ -738,6 +738,8 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
             fprintf(f, "   <== PREPARE");
         if (rules.armed && CompositeRuleMatches(rules, r))
             fprintf(f, rules.compositeByName ? "   <== COMPOSITE (named)" : "   <== COMPOSITE");
+        if (r.firstPassId != PassId::Unknown && r.firstPassId == static_cast<PassId>(m_debugBlitPass.load(std::memory_order_relaxed)))
+            fprintf(f, "   <== DEBUG-BLIT");
         fprintf(f, "\n");
     }
     fclose(f);
@@ -771,6 +773,13 @@ bool FrameAnalyzer::MatchComposite(const ListState& s, const BindingRecord& r) c
         return false;
     const InjectionRules& rules = CachedRules();
     return rules.armed && CompositeRuleMatches(rules, r);
+}
+
+bool FrameAnalyzer::MatchDebugBlit(const ListState& s, const BindingRecord& r) const
+{
+    const PassId pass = static_cast<PassId>(m_debugBlitPass.load(std::memory_order_relaxed));
+    return s.type == D3D12_COMMAND_LIST_TYPE_DIRECT && pass != PassId::Unknown && r.firstPassId == pass && r.rtvCount >= 1 &&
+           r.rtv[0].resource != nullptr && r.draws > 0;
 }
 
 InjectionRules FrameAnalyzer::Rules() const

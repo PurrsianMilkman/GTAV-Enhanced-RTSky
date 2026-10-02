@@ -168,6 +168,7 @@ struct ListState
     // Injection bookkeeping (owned by the Renderer)
     bool injectedPrepare = false;
     bool injectedComposite = false;
+    bool injectedDebugBlit = false;
     uint64_t preparedSerial = 0;          // Prepare recorded into this list (serial), 0 = none
     uint64_t compositeConsumedSerial = 0; // Prepare serial the Composite in this list paired with
     // Objects referenced by commands RTSky recorded into this list; kept alive until the GPU has

@@ -90,7 +90,8 @@ set(RTSKY_SHADERS
     "Temporal|TemporalCS.hlsl|TemporalCS|cs_6_0"
     "ATrous|ATrousCS.hlsl|ATrousCS|cs_6_0"
     "Composite|CompositeCS.hlsl|CompositeCS|cs_6_0"
-    "Probe|ProbeCS.hlsl|ProbeCS|cs_6_5")
+    "Probe|ProbeCS.hlsl|ProbeCS|cs_6_5"
+    "DebugBlit|DebugBlitCS.hlsl|DebugBlitCS|cs_6_0")
 
 foreach(_spec IN LISTS RTSKY_SHADERS)
     string(REPLACE "|" ";" _parts "${_spec}")

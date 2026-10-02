@@ -110,7 +110,8 @@ struct FrameConstants
     float4 compositeParams;  // x = strength, y = min ratio, z = max ratio, w = game sky occlusion assumption
     float4 compositeParams2; // x = direct scale, y = artificial ambient (solar units), z = ground albedo, w = emissive threshold
     float4 compositeParams3; // x = global fade [0,1], y = near fade distance (m), z = debug view, w = HDR target is sRGB-encoded (1) or linear (0)
-    float4 compositeParams4; // x = distance fade start (m), y = distance fade end (m), z = split compare (1), w 0
+    float4 compositeParams4; // x = distance fade start (m), y = distance fade end (m), z = split compare (1),
+                             // w = 1: debug views go only to the DebugView texture (drawn late by DEBUGBLIT)
 
     // --- calibration probe: 8 hypothesis cameras ---
     // probeCam[h*4+0].xyz = hypothesis camera offset relative to the CURRENT camera position,
@@ -163,8 +164,10 @@ struct SkyData
 // ATROUS i       SRV t0 inS, t1 inU, t2 LinearDepth[cur], t3 Normal[cur]   UAV u0 outS, u1 outU
 // COMPOSITE      SRV t0 FiltS[final], t1 FiltU[final], t2 LinearDepth[cur], t3 Normal[cur], t4 SkyData,
 //                    t5 HistMeta[cur], t6 TraceS
-//                UAV u0 HDR colour (game target in place, or SceneCopy)
+//                UAV u0 HDR colour (game target in place, or SceneCopy), u1 DebugView
 // PROBE          SRV t0 LinearDepth[cur]                                UAV u0 ProbeResults (uint[64])
+// DEBUGBLIT      SRV t0 DebugView           UAV u0 final image (in place, or the blit copy); PassConstants
+//                args0 = target viewport (x, y, w, h), args1 = DebugView size (w, h)
 //
 // Resource contents:
 //   TraceS   rgb = S (sky radiance * visibility, averaged over rays), a = sun/moon visibility
