@@ -5,7 +5,7 @@ session (for example Claude Code running locally on the Windows machine that has
 first, then `docs/ARCHITECTURE.md`. It records the goal, where things stand, what was decided and why,
 what is known to be uncertain, and what to do next.
 
-*State as of 2026-10-01: latest release **v0.1.4-alpha** (v0.1.2 and later come from a local session on the
+*State as of 2026-10-01: latest release **v0.2.0-alpha** (v0.1.2 and later come from a local session on the
 owner's machine). The game is at `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V
 Enhanced`; its `RTSky.log` can be read directly.*
 
@@ -48,33 +48,35 @@ stopped.
 |---|---|
 | Code | Complete: 11 HLSL shaders and the native C++ host, about 12K lines of code and docs |
 | Build | MSVC CI (Windows) and Linux host tests are green on every push. A local MinGW cross-build is also clean |
-| Tests | Host tests pass: `RTSkyMathTests` (17 checks) and `RTSkyAnalyzerTests` (23 checks in 11 scenarios) |
+| Tests | Host tests: `RTSkyMathTests`, `RTSkyPassNamesTests` (12), `RTSkyAnalyzerTests` (52 checks; Linux CI with shims, and natively with MSVC via `RTSKY_TEST_CLOCK`), `RTSkyRootSignatureTests` (Windows) |
 | Reviews | 4 adversarial review rounds (D3D12 sync, hooks/threads, shaders/math, integration, robustness, plus re-reviews of the fixes). Every confirmed finding is fixed except the deliberate exceptions in section 7 |
 | Releases | [v0.1.0-alpha](https://github.com/PurrsianMilkman/GTAV-Enhanced-RTSky/releases/tag/v0.1.0-alpha) and [v0.1.1-alpha](https://github.com/PurrsianMilkman/GTAV-Enhanced-RTSky/releases/tag/v0.1.1-alpha), both pre-releases with `RTSky-<tag>.zip` and its SHA-256 |
 | **In-game result** | **The owner ran v0.1.0-alpha: "the shader does not seem to make any visual changes."** No log was shared, so **the cause is unknown** |
 | Response | v0.1.1-alpha adds an on-screen status display whose first line names the first stage that stops RTSky. It also adds split-screen compare (Num 3), force relight (Num 4) and numpad hotkeys |
 | **v0.1.1 in game** | `RTSky.log` from the owner's run: hooks, ScriptHookV, hotkeys and TLAS capture all work. Two blockers. **(1)** The analyzer never armed: `G-buffer 5 RT [BGRA8_UNORM x4, RG16F] + D32S8 1707x960: the G-buffer or HDR pass is not unique per frame` for the whole session, so 0 Prepares / 0 Composites and nothing could change on screen. No frame dump was taken. **(2)** TLAS clone buffers grew 25% per build to 4.7 GB each, with 125 failed allocations (E_OUTOFMEMORY): slots were busy until the game reset its lists, so every build took the all-busy path, which sized from the old buffer |
 | v0.1.2 | Fixes (2): busy tokens are released when the GPU finishes a list's first execution (memory kept separately), the ring has 8 slots, and all-busy buffers are sized from the build. The same fix applies to the renderer's injection slots. For (1): the status and the dump name the ambiguous pass and its counts, and RTSky writes `RTSky_frame.log` on its own after 3 s of ambiguity |
-
 | **v0.1.2 in game** | The clone fix holds: 15 allocations in the first second, 640 KB each, then none. Still no visible change: `not unique per frame - G-buffer mrt#0 x12..x18 per frame (x.. after 0 hdr in its list)`. The auto dump showed why: **the G-buffer is recorded in ~15 parallel command lists**, each binding `5 RT [BGRA8 x4, RG16F] + D32S8` at its first binding, all on the direct queue before the lighting lists. Also in the dump: a 1024² six-face cubemap pass (depth clear 1.0), lit into a 2048x1024 R11G11B10F map with mips - very likely GTA's environment / reflection map, which holds the game's real sky (candidate source for the sky colours) |
 | v0.1.3 | Fixes the arming: when the G-buffer rule repeats only inside the G-buffer phase, Prepare goes after **every** such binding (`InjectionRules::gbufferEvery`), and all Prepares recorded since the last Composite form one group (one PendingFrame, parity, camera and constants slot), so the last one on the GPU leaves the complete depth. The dump prints `rt0=` / `ds=` resource pointers to tell which passes write the scene lighting buffer |
-
 | **v0.1.3 in game** | **RTSky runs**: armed in every-list mode (~13.4 Prepares per Composite), DXR pipeline created, calibration passed at once (latency 0, TLAS **camera-relative**, score 0.99-1.00), "ACTIVE - relighting". The owner reports the debug views are **"mixed into the scene"** (not a flat image). The Composite sits on the first full-res float pass after the G-buffer, `2 RT [RGBA16F,R16F] 1707x960`, a 1-draw pass followed by half-res R8 ping-pong passes and more 1-draw RGBA16F passes - most likely an intermediate lighting term (GI / ambient / AO, blurred and combined later), not the scene colour. What it holds decides whether it is the right target, so it is being identified by its shader rather than guessed |
 | v0.1.4 | Diagnostics: pipeline-creation hooks (device `CreateGraphicsPipelineState` / `CreatePipelineState`, `ID3D12PipelineLibrary1` loads) hash each pixel shader; the dump lists `ps=<hash>` per binding, and `[Detection] CaptureShaders=1` writes each shader once to `RTSky_shaders\ps_<hash>.dxil` for `dxc -dumpbin`. The status line counts `pipelines noted`. Also fixed: a cached CMake default froze the local version string at `0.1.1-dev` |
+| **v0.1.4 in game** | 6743 pipelines noted (GTA loads them from an `ID3D12PipelineLibrary`, hooked), 2560 distinct pixel shaders captured. **The entry names survive** (`PS_directional_standard_<8hex>_Wrapped`): the old Composite target was `PS_ApplyTemporalAccumulationLitColor_RTIndirectDiffuse` (the RTGI accumulation); the scene colour is lit by `PS_directional_standard` / `_scatter` / spot / point lights. Fable 5.1 reverse-engineered the lighting equation and the game's 32x32 HDR sky cube: research and plan in `D:\GTAV-RTSky-research\` (`LIGHTING-REPORT.md`, `PLAN-sky-replacement.md`; Rockstar-derived disassembly - **never commit it**) |
+| v0.2.0 (plan Stages 0 + 1) | Passes named by their pixel shader (`PassNames`, PSV0 string table; offline check 2558/2560 named, the other 2 carry no name). The Composite arms after `[Detection] CompositePass` (`PS_directional_standard`) whenever pipelines are named; the ordinal rule stays as fallback. Debug views go to an RTSky texture and are blitted into the final image after `PS_LensDistortion` (before the UI). **Input census**: root signatures (deserialized), texture SRVs / CBVs and their copies, buffers (VA -> resource, heap) are tracked; at the first `PS_directional_standard` draw the log names every input (`[Names]`, `[RootSig]`, `[Inputs]` with the resource state seen in that list) and every 10 s the game's sky-ambient constants (`[GameCB]`, CPU read of the upload buffer - nothing of the game's is bound on the GPU); `[SkyCube]` names the sky cube's slices. The relighting math is still v0.1.x's ratio (replaced in plan Stage 3) |
 
 ### The immediate next step
 
-Run v0.1.4 with `CaptureShaders=1` (set before starting the game), press Num . in gameplay, then:
+Run v0.2.0 (midday, open area, RT on): play 30 s, Num 5 through the views, Num 3 once, Num . once, then
+read `RTSky.log` against the Stage 1 pass/fail list in `PLAN-sky-replacement.md` section 8:
 
-- disassemble the pixel shaders of the COMPOSITE pass and of the other full-res float passes after
-  the G-buffer (`dxc -dumpbin RTSky_shaders\ps_<hash>.dxil`): which G-buffer channels, textures and
-  constants each reads and what it writes. Find the pass where the sky / ambient term is applied
-  to the scene colour, and the buffer that carries the scene colour onwards (`rt0=`);
-- point the Composite there (`CompositeCandidate` / `CompositeOrdinal`, or a new discriminator if
-  ordinals collide), and adapt `E_keep` if the target holds only an ambient term;
-- `pipelines noted` near 0 means the game creates pipelines some other way: find it before going on.
+- `[Names]`: `PS_directional_standard` >= 1 pipelines; analyzer `armed`, the dump's `<== COMPOSITE (named)` on
+  the 17-draw lighting binding; `First debug blit recorded (PS_LensDistortion ...)`;
+- `[Inputs]`: all 8 SRVs resolved (t12-t15 BGRA8 1707x960 = the G-buffer lists' targets, t10,s1 R8, t24,s1
+  RGBA16F) and 3/3 cbuffers inside known buffers; whether each texture has a barrier in the lighting list
+  decides the direct vs tap path of Stage 2;
+- `[GameCB]` values plausible (non-zero Nat0/Nat1 at midday, `0 < S <= 100`, `0.5 <= k <= 4`, `reg23.y & 1`
+  when RT GI is on); a line of zeros or "not CPU-readable" means Stage 3 needs the GPU route of plan 3.3;
+- `[SkyCube]`: one RGBA16F 32x32 array resource, 5 bindings, 5 distinct slices.
 
-Then follow section 6.
+Then plan Stage 2 (v0.2.1): the game's sky cube in the trace, unpacked inputs, the RTGI test.
 
 ---
 

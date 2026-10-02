@@ -112,6 +112,8 @@ private:
 
     void Analyze(bool forceDump);
     void WriteDump(size_t begin, size_t end, const InjectionRules& rules);
+    // [SkyCube], once: the game's sky cube (ps_sky_water_reflection_all bindings) in one complete frame.
+    void LogSkyCube(size_t begin, size_t end);
     const InjectionRules& CachedRules() const;
 
     mutable SRWLOCK m_lock = SRWLOCK_INIT;
@@ -147,6 +149,7 @@ private:
     std::wstring m_autoDumpPath;
     PipelineNamer m_pipelineNamer = nullptr;
     bool m_autoDumpDone = false;
+    bool m_skyCubeLogged = false;
     ULONGLONG m_ambiguousSince = 0; // tick of the first analysis in the current ambiguous run, 0 = none
     std::string m_ambiguity;        // which pass was ambiguous in the last analysis, and how ("" = none)
     std::string m_status = "waiting for frames";

@@ -19,6 +19,18 @@ extern const unsigned RTSKY_IDX_Device_CreateCommandQueue;
 extern const unsigned RTSKY_IDX_Device_CreateGraphicsPipelineState;
 extern const unsigned RTSKY_IDX_Device_CreatePipelineLibrary;
 extern const unsigned RTSKY_IDX_Device_CreatePipelineState;
+extern const unsigned RTSKY_IDX_Device_CreateRootSignature;
+extern const unsigned RTSKY_IDX_Device_CreateConstantBufferView;
+extern const unsigned RTSKY_IDX_Device_CreateUnorderedAccessView;
+extern const unsigned RTSKY_IDX_Device_CreateCommittedResource;
+extern const unsigned RTSKY_IDX_Device_CreatePlacedResource;
+extern const unsigned RTSKY_IDX_Device_CreateCommittedResource1;
+
+// ID3D12Device10 (patched only on devices that implement it)
+extern const unsigned RTSKY_IDX_Device10_CreateCommittedResource2;
+extern const unsigned RTSKY_IDX_Device10_CreatePlacedResource1;
+extern const unsigned RTSKY_IDX_Device10_CreateCommittedResource3;
+extern const unsigned RTSKY_IDX_Device10_CreatePlacedResource2;
 
 // ID3D12PipelineLibrary1
 extern const unsigned RTSKY_IDX_Library_LoadGraphicsPipeline;

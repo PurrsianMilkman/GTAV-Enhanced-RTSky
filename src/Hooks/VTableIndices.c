@@ -22,6 +22,17 @@ const unsigned RTSKY_IDX_Device_CreateCommandQueue = RTSKY_SLOT(ID3D12Device5, C
 const unsigned RTSKY_IDX_Device_CreateGraphicsPipelineState = RTSKY_SLOT(ID3D12Device5, CreateGraphicsPipelineState);
 const unsigned RTSKY_IDX_Device_CreatePipelineLibrary = RTSKY_SLOT(ID3D12Device5, CreatePipelineLibrary);
 const unsigned RTSKY_IDX_Device_CreatePipelineState = RTSKY_SLOT(ID3D12Device5, CreatePipelineState);
+const unsigned RTSKY_IDX_Device_CreateRootSignature = RTSKY_SLOT(ID3D12Device5, CreateRootSignature);
+const unsigned RTSKY_IDX_Device_CreateConstantBufferView = RTSKY_SLOT(ID3D12Device5, CreateConstantBufferView);
+const unsigned RTSKY_IDX_Device_CreateUnorderedAccessView = RTSKY_SLOT(ID3D12Device5, CreateUnorderedAccessView);
+const unsigned RTSKY_IDX_Device_CreateCommittedResource = RTSKY_SLOT(ID3D12Device5, CreateCommittedResource);
+const unsigned RTSKY_IDX_Device_CreatePlacedResource = RTSKY_SLOT(ID3D12Device5, CreatePlacedResource);
+const unsigned RTSKY_IDX_Device_CreateCommittedResource1 = RTSKY_SLOT(ID3D12Device5, CreateCommittedResource1);
+
+const unsigned RTSKY_IDX_Device10_CreateCommittedResource2 = RTSKY_SLOT(ID3D12Device10, CreateCommittedResource2);
+const unsigned RTSKY_IDX_Device10_CreatePlacedResource1 = RTSKY_SLOT(ID3D12Device10, CreatePlacedResource1);
+const unsigned RTSKY_IDX_Device10_CreateCommittedResource3 = RTSKY_SLOT(ID3D12Device10, CreateCommittedResource3);
+const unsigned RTSKY_IDX_Device10_CreatePlacedResource2 = RTSKY_SLOT(ID3D12Device10, CreatePlacedResource2);
 
 const unsigned RTSKY_IDX_Library_LoadGraphicsPipeline = RTSKY_SLOT(ID3D12PipelineLibrary1, LoadGraphicsPipeline);
 const unsigned RTSKY_IDX_Library_LoadPipeline = RTSKY_SLOT(ID3D12PipelineLibrary1, LoadPipeline);
@@ -74,3 +85,5 @@ _Static_assert(RTSKY_SLOT(ID3D12Device5, CopyDescriptorsSimple) == 24, "unexpect
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommandSignature) == 41, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommandQueue) == 8, "unexpected vtable layout");
 _Static_assert(RTSKY_SLOT(ID3D12Device5, CreateGraphicsPipelineState) == 10, "unexpected vtable layout");
+_Static_assert(RTSKY_SLOT(ID3D12Device5, CreateRootSignature) == 16, "unexpected vtable layout");
+_Static_assert(RTSKY_SLOT(ID3D12Device5, CreateCommittedResource) == 27, "unexpected vtable layout");

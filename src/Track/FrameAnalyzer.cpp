@@ -657,6 +657,9 @@ void FrameAnalyzer::Analyze(bool forceDump)
         m_ambiguousSince = 0;
     }
 
+    if (!m_skyCubeLogged)
+        LogSkyCube(phases[phases.size() - 2].first, phases.back().first);
+
     if (m_dumpRequested || forceDump || autoDump)
         WriteDump(phases[phases.size() - 2].first, phases.back().first, m_rules);
 
@@ -674,6 +677,43 @@ void FrameAnalyzer::Analyze(bool forceDump)
     }
     m_window.erase(m_window.begin(), m_window.begin() + static_cast<std::ptrdiff_t>(keepFrom));
     m_markers.swap(keptMarkers);
+}
+
+void FrameAnalyzer::LogSkyCube(size_t begin, size_t end)
+{
+    int bindings = 0;
+    const void* resource = nullptr;
+    bool oneResource = true;
+    uint32_t sliceMask = 0;
+    const BindingRecord* first = nullptr;
+    for (size_t i = begin; i < end && i < m_window.size(); ++i)
+    {
+        const BindingRecord& r = m_window[i];
+        if (r.firstPassId != PassId::SkyCube || r.rtvCount < 1)
+            continue;
+        ++bindings;
+        if (first == nullptr)
+        {
+            first = &r;
+            resource = r.rtv[0].resource;
+        }
+        oneResource = oneResource && r.rtv[0].resource == resource;
+        if (r.rtv[0].arraySlice < 32)
+            sliceMask |= 1u << r.rtv[0].arraySlice;
+    }
+    if (first == nullptr)
+        return; // not in this frame (names unavailable, or the reflection pass was skipped)
+    m_skyCubeLogged = true;
+    std::string slices;
+    for (uint32_t s = 0; s < 32; ++s)
+    {
+        if (sliceMask & (1u << s))
+            slices += (slices.empty() ? "" : ",") + std::to_string(s);
+    }
+    const BoundTarget& t = first->rtv[0];
+    LOG_INFO("[SkyCube] %p: fmt %d %llux%u array %u: %d bindings per frame on %s, slices %s", resource, static_cast<int>(t.resourceFormat),
+             static_cast<unsigned long long>(t.width), t.height, t.arraySize, bindings, oneResource ? "one resource" : "SEVERAL resources",
+             slices.c_str());
 }
 
 void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& rules)
@@ -723,6 +763,8 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
         // Resource identities: which passes write the same target (e.g. the scene lighting buffer).
         if (r.rtvCount > 0)
             fprintf(f, " rt0=%p", static_cast<const void*>(r.rtv[0].resource));
+        if (r.rtvCount > 0 && r.rtv[0].arraySize > 1)
+            fprintf(f, " slice=%u/%u", r.rtv[0].arraySlice, r.rtv[0].arraySize);
         if (r.hasDsv)
             fprintf(f, " ds=%p", static_cast<const void*>(r.dsv.resource));
         // Pixel shaders it drew with: entry names, else #<hash> (RTSky_shaders\ps_<hash>.dxil with

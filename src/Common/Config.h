@@ -105,6 +105,7 @@ struct Config
     bool tlasClone = true;
     int stableFrames = 3;
     bool captureShaders = false;   // write the game's pixel shaders to RTSky_shaders (diagnostics)
+    bool trackShaderDescriptors = true; // texture SRVs / CBVs and their copies (names a pass's inputs)
 
     // [Sky]
     float sunIntensity = 1.0f;
