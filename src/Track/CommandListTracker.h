@@ -53,6 +53,10 @@ struct BindingRecord
     bool noInjectAfter = false; // suspending render pass / PRESERVE_LOCAL ending access: nothing may follow
     bool dsvCleared = false;
     float dsvClearDepth = 0.0f;
+    // The first distinct pipelines this binding drew with (frame dump: names the pass by its shader).
+    static constexpr uint32_t kMaxPsos = 4;
+    const void* psos[kMaxPsos] = {};
+    uint32_t psoCount = 0;
 };
 
 // Classification helpers shared by the tracker, the analyzer and the injector.

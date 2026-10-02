@@ -414,6 +414,14 @@ void OnDraw(ListState& s)
     }
     ++r.draws;
     r.barrierSeqAtLastDraw = s.barrierSeq;
+    if (s.pipelineKind == ListState::PipelineKind::Pso && s.pso != nullptr && r.psoCount < BindingRecord::kMaxPsos)
+    {
+        bool seen = false;
+        for (uint32_t i = 0; i < r.psoCount && !seen; ++i)
+            seen = r.psos[i] == s.pso;
+        if (!seen)
+            r.psos[r.psoCount++] = s.pso;
+    }
 }
 
 void OnViewports(ListState& s, UINT count, const D3D12_VIEWPORT* viewports)

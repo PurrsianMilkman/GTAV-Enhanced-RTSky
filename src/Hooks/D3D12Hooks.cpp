@@ -12,6 +12,7 @@
 #include "../Track/CommandListTracker.h"
 #include "../Track/DescriptorTracker.h"
 #include "../Track/FrameAnalyzer.h"
+#include "../Track/ShaderCapture.h"
 #include "../Track/TlasTracker.h"
 
 #include <MinHook.h>
@@ -31,6 +32,7 @@ using track::ListState;
 VTableHook g_device("ID3D12Device");
 VTableHook g_list("ID3D12GraphicsCommandList");
 VTableHook g_queue("ID3D12CommandQueue");
+VTableHook g_library("ID3D12PipelineLibrary");
 
 std::atomic<bool> g_installed{ false };
 std::atomic<bool> g_installFailed{ false };
@@ -206,6 +208,83 @@ HRESULT STDMETHODCALLTYPE Device_CreateCommandSignature(ID3D12Device* self, cons
         ComPtr<ID3D12CommandSignature> sig;
         if (SUCCEEDED(static_cast<IUnknown*>(*signature)->QueryInterface(IID_PPV_ARGS(&sig))))
             track::NoteCommandSignature(sig.Get(), draws);
+    }
+    return hr;
+}
+
+// Pipelines: noted with their pixel-shader hash so the frame dump can name each pass by its shader
+// (track/ShaderCapture). Keyed by the ID3D12PipelineState pointer the game later binds.
+ID3D12PipelineState* AsPipeline(void** object, ComPtr<ID3D12PipelineState>* holder)
+{
+    if (object == nullptr || *object == nullptr ||
+        FAILED(static_cast<IUnknown*>(*object)->QueryInterface(IID_PPV_ARGS(holder->GetAddressOf()))))
+        return nullptr;
+    return holder->Get();
+}
+
+HRESULT STDMETHODCALLTYPE Device_CreateGraphicsPipelineState(ID3D12Device* self, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
+                                                             REFIID riid, void** pso)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreateGraphicsPipelineState, self, desc, riid, pso);
+    ComPtr<ID3D12PipelineState> p;
+    if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
+        track::NotePipeline(p.Get(), desc->PS);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Device_CreatePipelineState(ID3D12Device* self, const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid,
+                                                     void** pso)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_PIPELINE_STATE_STREAM_DESC*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreatePipelineState, self, desc, riid, pso);
+    ComPtr<ID3D12PipelineState> p;
+    if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
+        track::NotePipelineStream(p.Get(), *desc);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Library_LoadGraphicsPipeline(ID3D12PipelineLibrary* self, LPCWSTR name,
+                                                       const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** pso)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary*, LPCWSTR, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_library, RTSKY_IDX_Library_LoadGraphicsPipeline, self, name, desc, riid, pso);
+    ComPtr<ID3D12PipelineState> p;
+    if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
+        track::NotePipeline(p.Get(), desc->PS);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Library_LoadPipeline(ID3D12PipelineLibrary1* self, LPCWSTR name, const D3D12_PIPELINE_STATE_STREAM_DESC* desc,
+                                               REFIID riid, void** pso)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary1*, LPCWSTR, const D3D12_PIPELINE_STATE_STREAM_DESC*, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_library, RTSKY_IDX_Library_LoadPipeline, self, name, desc, riid, pso);
+    ComPtr<ID3D12PipelineState> p;
+    if (SUCCEEDED(hr) && desc != nullptr && !HookBypass::Active() && AsPipeline(pso, &p) != nullptr)
+        track::NotePipelineStream(p.Get(), *desc);
+    return hr;
+}
+
+// Pipelines loaded from a pipeline library never pass through the device's Create calls. Libraries
+// are patched only when they expose ID3D12PipelineLibrary1 on the same pointer (LoadPipeline is
+// written into the vtable).
+HRESULT STDMETHODCALLTYPE Device_CreatePipelineLibrary(ID3D12Device* self, const void* blob, SIZE_T length, REFIID riid, void** library)
+{
+    using Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const void*, SIZE_T, REFIID, void**);
+    HRESULT hr = Orig<Fn>(g_device, RTSKY_IDX_Device_CreatePipelineLibrary, self, blob, length, riid, library);
+    if (SUCCEEDED(hr) && library != nullptr && *library != nullptr && !HookBypass::Active() && g_installed.load())
+    {
+        ComPtr<ID3D12PipelineLibrary1> lib;
+        if (SUCCEEDED(static_cast<IUnknown*>(*library)->QueryInterface(IID_PPV_ARGS(&lib))) && lib.Get() == *library)
+        {
+            if (!g_library.IsKnownFast(lib.Get()) && g_library.Patch(lib.Get()))
+                LOG_INFO("The game uses a pipeline library; its loads are hooked for the shader capture");
+        }
+        else
+        {
+            RTSKY_LOG_ONCE(log::Level::Warning, "Pipeline library without ID3D12PipelineLibrary1: its pipelines stay unnamed in the frame dump");
+        }
     }
     return hr;
 }
@@ -637,6 +716,9 @@ void RegisterHooks()
     g_device.AddHook(RTSKY_IDX_Device_CopyDescriptorsSimple, reinterpret_cast<void*>(&Device_CopyDescriptorsSimple));
     g_device.AddHook(RTSKY_IDX_Device_CreateCommandSignature, reinterpret_cast<void*>(&Device_CreateCommandSignature));
     g_device.AddHook(RTSKY_IDX_Device_CreateCommandQueue, reinterpret_cast<void*>(&Device_CreateCommandQueue));
+    g_device.AddHook(RTSKY_IDX_Device_CreateGraphicsPipelineState, reinterpret_cast<void*>(&Device_CreateGraphicsPipelineState));
+    g_device.AddHook(RTSKY_IDX_Device_CreatePipelineState, reinterpret_cast<void*>(&Device_CreatePipelineState));
+    g_device.AddHook(RTSKY_IDX_Device_CreatePipelineLibrary, reinterpret_cast<void*>(&Device_CreatePipelineLibrary));
 
 #define RTSKY_HOOK(Name) g_list.AddHook(RTSKY_IDX_CL_##Name, reinterpret_cast<void*>(&CL_##Name))
     RTSKY_HOOK(Close);
@@ -674,6 +756,8 @@ void RegisterHooks()
 #undef RTSKY_HOOK
 
     g_queue.AddHook(RTSKY_IDX_Queue_ExecuteCommandLists, reinterpret_cast<void*>(&Queue_ExecuteCommandLists));
+    g_library.AddHook(RTSKY_IDX_Library_LoadGraphicsPipeline, reinterpret_cast<void*>(&Library_LoadGraphicsPipeline));
+    g_library.AddHook(RTSKY_IDX_Library_LoadPipeline, reinterpret_cast<void*>(&Library_LoadPipeline));
 }
 
 // Patches the device, queue and command list vtables using objects created on `device`.
@@ -765,6 +849,7 @@ bool PatchFromDevice(ID3D12Device* device)
         // Leave nothing half-installed: hooks without a complete set would track lists partially.
         g_list.Unpatch();
         g_queue.Unpatch();
+        g_library.Unpatch();
         g_device.Unpatch();
         g_installFailed.store(true);
     }
@@ -917,12 +1002,14 @@ void VerifyHooks()
     g_device.Verify();
     g_list.Verify();
     g_queue.Verify();
+    g_library.Verify();
 }
 
 void Uninstall()
 {
     g_list.Unpatch();
     g_queue.Unpatch();
+    g_library.Unpatch();
     g_device.Unpatch();
     if (g_createDeviceTarget != nullptr)
         MH_DisableHook(g_createDeviceTarget);

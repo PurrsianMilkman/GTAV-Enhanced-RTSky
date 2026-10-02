@@ -18,6 +18,7 @@
 #include "../Hooks/Bypass.h"
 #include "../Hooks/D3D12Hooks.h"
 #include "../Track/FrameAnalyzer.h"
+#include "../Track/ShaderCapture.h"
 #include "../Track/TlasTracker.h"
 
 #include <d3dx12.h>
@@ -1734,9 +1735,10 @@ std::string RendererImpl::Status()
     std::string skip = m_lastSkip;
     ReleaseSRWLockShared(&m_lock);
     char buf[512];
-    snprintf(buf, sizeof(buf), "renderer %s, %llu prepares, %llu composites (%llu paired late, %llu TLAS bound at submit), calibration: %s%s%s",
+    snprintf(buf, sizeof(buf), "renderer %s, %llu prepares, %llu composites (%llu paired late, %llu TLAS bound at submit), %llu pipelines noted, calibration: %s%s%s",
              init, static_cast<unsigned long long>(m_prepares.load()), static_cast<unsigned long long>(m_composites.load()),
              static_cast<unsigned long long>(m_pairingLag.load()), static_cast<unsigned long long>(m_lateTlas.load()),
+             static_cast<unsigned long long>(track::NotedPipelines()),
              m_calibration.Describe().c_str(), skip.empty() ? "" : ", last skip: ", skip.c_str());
     return buf;
 }
