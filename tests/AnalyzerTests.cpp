@@ -199,7 +199,7 @@ int main()
         Frames(60, { { a, "GHH" } });
         const InjectionRules r = Analyzer().Rules();
         Check(r.armed, "armed");
-        Check(r.gbufferOrdinal == 0 && r.gbufferHdrBefore == -1, "Prepare at mrt#0, no discriminator");
+        Check(r.gbufferEvery && r.gbufferHdrBefore == -1, "Prepare after every G-buffer binding, no discriminator");
         Check(r.hdrOrdinal == 0 && r.hdrMrtBefore == -1, "Composite at hdr#0, no discriminator");
     }
     {
@@ -208,7 +208,7 @@ int main()
         Frames(60, { { a, "GGGHH" } });
         const InjectionRules r = Analyzer().Rules();
         Check(r.armed, "armed");
-        Check(r.gbufferOrdinal == 2, "Prepare at mrt#2");
+        Check(r.gbufferEvery, "Prepare after every G-buffer binding (the last one on the GPU wins)");
         Check(r.hdrOrdinal == 0, "Composite at hdr#0");
     }
     {
@@ -216,7 +216,7 @@ int main()
         ID3D12GraphicsCommandList* a = NewList();
         Frames(60, { { a, "GgH" } });
         const InjectionRules r = Analyzer().Rules();
-        Check(r.armed && r.gbufferOrdinal == 0, "Prepare at mrt#0 (not the read-only mrt#1)");
+        Check(r.armed && r.gbufferEvery, "Prepare after every depth-writing G-buffer binding");
     }
     {
         Scenario("a float MRT pass inside the G-buffer phase does not split the frame");
@@ -224,7 +224,7 @@ int main()
         Frames(60, { { a, "GFGH" } });
         const InjectionRules r = Analyzer().Rules();
         Check(r.armed, "armed");
-        Check(r.gbufferOrdinal == 2, "Prepare at mrt#2 (after the float MRT pass)");
+        Check(r.gbufferEvery, "every-binding mode across the float MRT pass");
         Check(r.hdrOrdinal == 1, "Composite at hdr#1 (the float MRT pass is hdr#0)");
     }
     {
@@ -265,7 +265,7 @@ int main()
         Frames(60, { { a, "G" }, { b, "G" }, { c, "Gg" }, { d, "HH" } });
         const InjectionRules r = Analyzer().Rules();
         Check(r.armed, "armed");
-        Check(r.gbufferEvery && r.gbufferOrdinal == 0, "Prepare after every mrt#0 (every-list mode)");
+        Check(r.gbufferEvery, "Prepare after every G-buffer binding (every-binding mode)");
         Check(r.hdrOrdinal == 0, "Composite at hdr#0");
         ListState& sa = *GetListState(a);
         OnReset(sa, nullptr);
@@ -318,16 +318,47 @@ int main()
         Check(Analyzer().Status().find("PS_directional_standard x2 per frame") != std::string::npos, "status: PS_directional_standard x2 per frame");
     }
     {
-        Scenario("named: the lighting pass disappears (menu) -> disarmed, re-armed when it returns");
+        Scenario("named: the lighting pass disappears -> armed through a 1 s gap, disarmed after 2 s, re-armed when it returns");
         ID3D12GraphicsCommandList* g1 = NewList();
         ID3D12GraphicsCommandList* lit = NewList();
         Frames(60, { { g1, "G" }, { lit, "DH" } });
         Check(Analyzer().Rules().armed && Analyzer().Rules().compositeByName, "armed by name");
-        Frames(60, { { g1, "G" }, { lit, "NH" } });
-        Check(!Analyzer().Rules().armed, "disarmed while names are seen but PS_directional_standard is not drawn");
+        const uint64_t generation = Analyzer().Rules().generation;
+        Frames(60, { { g1, "G" }, { lit, "NH" } }); // ~1 s: a loading hitch, a time jump
+        Check(Analyzer().Rules().armed && Analyzer().Rules().generation == generation, "a 1 s gap keeps the same rules armed");
+        Frames(120, { { g1, "G" }, { lit, "NH" } }); // ~3 s in all: a menu
+        Check(!Analyzer().Rules().armed, "disarmed once PS_directional_standard is missing for 2 s");
         Check(Analyzer().Status().find("PS_directional_standard not drawn") != std::string::npos, "status names the missing pass");
         Frames(60, { { g1, "G" }, { lit, "DH" } });
         Check(Analyzer().Rules().armed && Analyzer().Rules().compositeByName, "re-armed by name");
+    }
+    {
+        // v0.2.0 in game: the last G-buffer list re-binds the G-buffer for a few LOD objects in some
+        // frames only (time of day, what is on screen). The Prepare rule must not depend on that.
+        Scenario("G-buffer re-bound in some frames only: the rules never change and Prepare follows every binding");
+        ID3D12GraphicsCommandList* g1 = NewList();
+        ID3D12GraphicsCommandList* g2 = NewList();
+        ID3D12GraphicsCommandList* g3 = NewList();
+        ID3D12GraphicsCommandList* lit = NewList();
+        Frames(60, { { g1, "G" }, { g2, "G" }, { g3, "G" }, { lit, "DH" } });
+        Check(Analyzer().Rules().armed && Analyzer().Rules().gbufferEvery, "armed, every G-buffer binding");
+        const uint64_t generation = Analyzer().Rules().generation;
+        for (int i = 0; i < 40; ++i)
+        {
+            Frames(3, { { g1, "G" }, { g2, "G" }, { g3, "GgG" }, { lit, "DH" } });
+            Frames(2, { { g1, "G" }, { g2, "G" }, { g3, "G" }, { lit, "DH" } });
+        }
+        Check(Analyzer().Rules().armed && Analyzer().Rules().generation == generation, "200 frames alternating: the same rules, never disarmed");
+        ListState& s = *GetListState(g3);
+        OnReset(s, nullptr);
+        Bind(s, 'G', 80);
+        const BindingRecord first = s.log.back();
+        Bind(s, 'g', 7);
+        const BindingRecord decal = s.log.back();
+        Bind(s, 'G', 5);
+        const BindingRecord lod = s.log.back();
+        Check(Analyzer().MatchPrepare(s, first) && Analyzer().MatchPrepare(s, lod), "Prepare after both depth-writing bindings (mrt#0 and mrt#2)");
+        Check(!Analyzer().MatchPrepare(s, decal), "not after the read-only decal re-bind");
     }
     {
         Scenario("named: CompositeOrdinal pins the ordinal rule even when names are available");
