@@ -28,6 +28,7 @@ constexpr ULONGLONG kGameCbInterval = 10000;
 
 std::atomic<ULONGLONG> g_nextCensus{ 0 };
 std::atomic<bool> g_fullDone{ false };
+std::atomic<uint32_t> g_lastFlags{ UINT32_MAX - 1 }; // reg23.y of the last census
 std::atomic<bool> g_busy{ false };
 
 // The registers of PS_directional_standard RTSky's replacement reads (LIGHTING-REPORT.md section 1).
@@ -244,7 +245,8 @@ struct F4
 
 // [GameCB]: the sky-ambient constants as the game set them for this draw (CPU read of the upload
 // buffer; the values may be mid-update, which the next line would show).
-void LogGameConstants(const Resolved cb[CB_Count])
+// Returns the reg23.y flags (UINT32_MAX when lighting_locals could not be read).
+uint32_t LogGameConstants(const Resolved cb[CB_Count])
 {
     F4 lg[7] = {};    // lighting_globals regs 43..49
     F4 mg14 = {};     // misc_globals reg14 (z = S)
@@ -265,12 +267,20 @@ void LogGameConstants(const Resolved cb[CB_Count])
              lg[3].y, lg[3].z, lg[4].x, lg[4].y, lg[4].z, lg[5].x, lg[5].y, lg[5].z, haveLg ? "" : " [lighting_globals not CPU-readable]",
              haveMg ? "" : " [misc_globals not CPU-readable]", haveLl ? "" : " [lighting_locals not CPU-readable]");
     LOG_INFO("%s", buf);
+    return haveLl ? flags : UINT32_MAX;
 }
 
-void Census(const ListState& s, bool full)
+void Census(const ListState& s, bool first)
 {
     track::RootLayout layout;
     const bool haveLayout = s.graphics.rootSignature != nullptr && track::GetRootLayout(s.graphics.rootSignature, &layout);
+    Resolved cb[CB_Count];
+    for (int i = 0; i < CB_Count && haveLayout; ++i)
+        cb[i] = Resolve(s, layout, kCbs[i]);
+    // The whole census again whenever the game's RT flags change: the first lighting frame can come
+    // before ray tracing is on, with placeholder AO / RTGI textures bound (v0.2.0).
+    const uint32_t flags = haveLayout ? LogGameConstants(cb) : UINT32_MAX;
+    const bool full = first || flags != g_lastFlags.exchange(flags);
     if (full)
     {
         std::string names;
@@ -296,10 +306,6 @@ void Census(const ListState& s, bool full)
     }
     if (!haveLayout)
         return;
-
-    Resolved cb[CB_Count];
-    for (int i = 0; i < CB_Count; ++i)
-        cb[i] = Resolve(s, layout, kCbs[i]);
     if (full)
     {
         for (const Reg& r : kSrvs)
@@ -307,7 +313,6 @@ void Census(const ListState& s, bool full)
         for (int i = 0; i < CB_Count; ++i)
             LOG_INFO("[Inputs] %s", DescribeCb(kCbs[i], cb[i]).c_str());
     }
-    LogGameConstants(cb);
 }
 
 } // namespace

@@ -73,6 +73,8 @@ public:
     // Cheap, lock-free on the fast path (thread-local copy refreshed on generation change).
     bool MatchPrepare(const ListState& s, const BindingRecord& r) const;
     bool MatchComposite(const ListState& s, const BindingRecord& r) const;
+    // True when the armed Prepare rule matches every G-buffer binding (lock-free, as MatchPrepare).
+    bool PrepareEveryBinding() const { return CachedRules().armed && CachedRules().gbufferEvery; }
     // The final image for the debug blit: a binding whose first draw is the configured pass
     // (PS_LensDistortion). By name only, independent of the armed rules (Unknown = never).
     bool MatchDebugBlit(const ListState& s, const BindingRecord& r) const;
@@ -135,6 +137,7 @@ private:
     bool m_candHdrNamed = false;
     int m_stableCount = 0;
     bool m_namedPassMissing = false; // names seen, but the Composite pass was not drawn after the G-buffer
+    ULONGLONG m_missingSince = 0;   // first analysis of the current run without the lighting pass, 0 = none
 
     // Configuration
     int m_compositeCandidate = 0;
