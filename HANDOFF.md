@@ -5,7 +5,7 @@ session (for example Claude Code running locally on the Windows machine that has
 first, then `docs/ARCHITECTURE.md`. It records the goal, where things stand, what was decided and why,
 what is known to be uncertain, and what to do next.
 
-*State as of 2026-10-01: latest release **v0.2.0-alpha** (v0.1.2 and later come from a local session on the
+*State as of 2026-10-01: latest release **v0.2.1-alpha** (v0.1.2 and later come from a local session on the
 owner's machine). The game is at `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V
 Enhanced`; its `RTSky.log` can be read directly.*
 
@@ -61,10 +61,12 @@ stopped.
 | v0.1.4 | Diagnostics: pipeline-creation hooks (device `CreateGraphicsPipelineState` / `CreatePipelineState`, `ID3D12PipelineLibrary1` loads) hash each pixel shader; the dump lists `ps=<hash>` per binding, and `[Detection] CaptureShaders=1` writes each shader once to `RTSky_shaders\ps_<hash>.dxil` for `dxc -dumpbin`. The status line counts `pipelines noted`. Also fixed: a cached CMake default froze the local version string at `0.1.1-dev` |
 | **v0.1.4 in game** | 6743 pipelines noted (GTA loads them from an `ID3D12PipelineLibrary`, hooked), 2560 distinct pixel shaders captured. **The entry names survive** (`PS_directional_standard_<8hex>_Wrapped`): the old Composite target was `PS_ApplyTemporalAccumulationLitColor_RTIndirectDiffuse` (the RTGI accumulation); the scene colour is lit by `PS_directional_standard` / `_scatter` / spot / point lights. Fable 5.1 reverse-engineered the lighting equation and the game's 32x32 HDR sky cube: research and plan in `D:\GTAV-RTSky-research\` (`LIGHTING-REPORT.md`, `PLAN-sky-replacement.md`; Rockstar-derived disassembly - **never commit it**) |
 | v0.2.0 (plan Stages 0 + 1) | Passes named by their pixel shader (`PassNames`, PSV0 string table; offline check 2558/2560 named, the other 2 carry no name). The Composite arms after `[Detection] CompositePass` (`PS_directional_standard`) whenever pipelines are named; the ordinal rule stays as fallback. Debug views go to an RTSky texture and are blitted into the final image after `PS_LensDistortion` (before the UI). **Input census**: root signatures (deserialized), texture SRVs / CBVs and their copies, buffers (VA -> resource, heap) are tracked; at the first `PS_directional_standard` draw the log names every input (`[Names]`, `[RootSig]`, `[Inputs]` with the resource state seen in that list) and every 10 s the game's sky-ambient constants (`[GameCB]`, CPU read of the upload buffer - nothing of the game's is bound on the GPU); `[SkyCube]` names the sky cube's slices. The relighting math is still v0.1.x's ratio (replaced in plan Stage 3) |
+| **v0.2.0 in game** | The census works: all registers resolve through descriptor tables (root parameter p0 / p1); t12-t15 are the G-buffer targets themselves (**no barrier in the lighting list**: Stage 2 needs the taps), depth / stencil have one (0xE0); the three cbuffers are CBVs in a 90 MB **UPLOAD** ring (CPU-readable); the first census ran before RT was on (reg23.y = 0, placeholder 1x1 AO / RTGI). `[GameCB]` tracks the time of day (Nat0 / Nat1 change with the clock; `reg23 = (0.75, 0x7, 0.7)` with RT on: fade target 0.75, AO power k 0.7, DirAmb 0 by day). `[SkyCube]`: RGBA16F 32x32 **array 6**, slices 0-5, 11 bindings on several resources (two cube passes). **Owner: "rendering stops, especially during certain times of day"**: the G-buffer rule flipped between "ordinal 0, every parallel list" and "ordinal 3" (the last G-buffer list re-binds the G-buffer for a few LOD objects in some frames only), and any frame without the lighting pass disarmed everything |
+| v0.2.1 | **Fix:** the Prepare rule matches every depth-writing G-buffer binding (any list, any ordinal) whenever all of them come before the lighting, and a list gets a Prepare after each; the rules stay armed through gaps shorter than 2 s (they disarm at once only when a pass turns ambiguous). The census repeats whenever the game's RT flags (reg23.y) change |
 
 ### The immediate next step
 
-Run v0.2.0 (midday, open area, RT on): play 30 s, Num 5 through the views, Num 3 once, Num . once, then
+Run v0.2.1 (midday, open area, RT on): play 30 s, Num 5 through the views, Num 3 once, Num . once, then
 read `RTSky.log` against the Stage 1 pass/fail list in `PLAN-sky-replacement.md` section 8:
 
 - `[Names]`: `PS_directional_standard` >= 1 pipelines; analyzer `armed`, the dump's `<== COMPOSITE (named)` on
@@ -76,7 +78,7 @@ read `RTSky.log` against the Stage 1 pass/fail list in `PLAN-sky-replacement.md`
   when RT GI is on); a line of zeros or "not CPU-readable" means Stage 3 needs the GPU route of plan 3.3;
 - `[SkyCube]`: one RGBA16F 32x32 array resource, 5 bindings, 5 distinct slices.
 
-Then plan Stage 2 (v0.2.1): the game's sky cube in the trace, unpacked inputs, the RTGI test.
+Then plan Stage 2 (v0.2.2): the game's sky cube in the trace, unpacked inputs (G-buffer via taps), the RTGI test.
 
 ---
 

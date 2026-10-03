@@ -162,11 +162,16 @@ forwards straight to the original while it is active, so RTSky's own calls are n
   A rule is a format/size signature plus the per-list ordinal, and it must match exactly one binding
   per frame. If the ordinal alone is ambiguous, the number of G-buffer (or HDR) bindings recorded
   earlier in the same list is added as a discriminator; if that is still ambiguous, nothing is
-  armed. One exception: a G-buffer recorded in parallel lists (GTA V Enhanced: ~15 lists, each
-  binding it first) repeats the same rule in every list. When every depth-writing match lies inside
-  the phase, the Prepare rule arms in *every-list* mode (`gbufferEvery`) and matches each of them
-  (see 5.3). Rules arm after `StableFrames` identical frames and disarm when the structure changes
-  (menus, loading: a phase that grows past 64 bindings without lighting). The depth clear value of
+  armed. The G-buffer is the exception: whenever every depth-writing binding with the G-buffer
+  signature lies inside the phase (none after the lighting), the Prepare rule arms in
+  *every-binding* mode (`gbufferEvery`): it matches each of them, in any list and at any ordinal, and
+  a list that re-binds the G-buffer gets a Prepare after each binding (see 5.3). GTA V Enhanced
+  records it in ~15 parallel lists and, in some frames only (time of day, what is on screen),
+  re-binds it in the last one for a few LOD objects; a rule naming one ordinal flipped with that
+  (v0.2.0). Rules arm after `StableFrames` identical frames. They disarm at once when a pass
+  becomes ambiguous, after a phase grows past 64 bindings without lighting (menus, loading), or when
+  the lighting pass has been missing for 2 s; a shorter gap (a hitch, a time-of-day jump) keeps them
+  armed, since they simply match nothing meanwhile. The depth clear value of
   the G-buffer depth (0 or 1) decides reversed or standard Z. Num . dumps one frame, with the
   resources and pixel-shader hashes of each binding.
 * **ShaderCapture / PassNames**: the device's `CreateGraphicsPipelineState` / `CreatePipelineState` and

@@ -2030,7 +2030,9 @@ void OnBindingClosed(ID3D12GraphicsCommandList* list, track::ListState& state, c
     if (!state.sawReset || state.stateUnknown)
         return; // root / heap state unknown (list first seen mid-recording, or a bundle was executed)
     const track::FrameAnalyzer& analyzer = track::Analyzer();
-    const bool prepare = !state.injectedPrepare && analyzer.MatchPrepare(state, record);
+    // Every-binding mode: a list that re-binds the G-buffer (LOD objects) gets a Prepare after each
+    // binding, so the last one on the GPU still sees all of the depth.
+    const bool prepare = (!state.injectedPrepare || analyzer.PrepareEveryBinding()) && analyzer.MatchPrepare(state, record);
     const bool composite = !state.injectedComposite && analyzer.MatchComposite(state, record);
     const bool blit = !state.injectedDebugBlit && analyzer.MatchDebugBlit(state, record);
     if (!prepare && !composite && !blit)
