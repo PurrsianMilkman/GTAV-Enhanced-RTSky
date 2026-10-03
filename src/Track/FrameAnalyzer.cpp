@@ -64,12 +64,13 @@ std::string FormatString(DXGI_FORMAT f)
 // The Prepare rule without the armed check (shared by recording-time matching and the dump).
 bool PrepareRuleMatches(const InjectionRules& rules, const BindingRecord& r)
 {
-    if (r.mrtOrdinal != rules.gbufferOrdinal || !rules.gbuffer.Matches(r))
+    if (r.mrtOrdinal < 0 || !rules.gbuffer.Matches(r))
         return false;
-    // Every-list mode: only depth-writing binds (the depth is in DEPTH_WRITE there).
+    // Every-binding mode: any ordinal, depth-writing binds only (the depth is in DEPTH_WRITE there).
     if (rules.gbufferEvery)
         return !r.dsvReadOnlyDepth;
-    return rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore;
+    return r.mrtOrdinal == rules.gbufferOrdinal &&
+           (rules.gbufferHdrBefore < 0 || static_cast<int32_t>(r.hdrBefore) == rules.gbufferHdrBefore);
 }
 
 // The Composite rule without the armed check: by pass name when armed that way, else by ordinal.
@@ -255,6 +256,8 @@ void FrameAnalyzer::OnExecute(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
 static constexpr uint32_t kStalledPhaseBindings = 64;
 // Ambiguous this long without a break: not a loading transient, write the frame dump on its own.
 static constexpr ULONGLONG kAutoDumpAfterMs = 3000;
+// A lighting pass missing this long (not a hitch: a menu) disarms the rules.
+static constexpr ULONGLONG kDisarmAfterMissingMs = 2000;
 
 void FrameAnalyzer::Analyze(bool forceDump)
 {
@@ -408,6 +411,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
     //    recorded earlier in the same list is added as a discriminator.
     int framesWithoutHdr = 0;
     int ambiguousFrames = 0;
+    int goodFrames = 0;
     m_ambiguity.clear();
     for (size_t k = 0; k + 1 < phases.size(); ++k)
     {
@@ -498,15 +502,18 @@ void FrameAnalyzer::Analyze(bool forceDump)
             if (gDiscCount != 1)
                 gDisc = -2;
         }
-        // A G-buffer recorded in parallel lists: the same binding at the same ordinal in several
-        // lists, not told apart by the HDR passes before it. When every depth-writing occurrence lies
-        // inside the G-buffer phase (none after the lighting), Prepare after each of them is safe:
-        // the last one on the GPU sees the complete depth (see the renderer's Prepare groups).
-        // Read-only-depth re-binds are never matched in that mode.
+        // Prepare after EVERY depth-writing binding with the G-buffer signature, whatever its ordinal,
+        // whenever all of them lie inside the G-buffer phase (none after the lighting): the last one
+        // on the GPU sees the complete depth (see the renderer's Prepare groups). This does not depend
+        // on how many lists draw the G-buffer or where a list re-binds it: GTA V Enhanced records it in
+        // ~15 parallel lists and, in some frames only (time of day, what is on screen), re-binds it in
+        // the last list for a few LOD objects. A rule naming one ordinal flipped with that and kept
+        // re-arming, which stopped the relighting (v0.2.0). Read-only re-binds (decals) are never
+        // matched; a pinned GBufferOrdinal keeps the ordinal rule.
         bool gEvery = false;
-        if (gDisc == -2 && !g->dsvReadOnlyDepth)
+        if (m_gbufferOrdinalOverride < 0 && !g->dsvReadOnlyDepth)
         {
-            auto writes = [&](const BindingRecord& r) { return r.mrtOrdinal == g->mrtOrdinal && gSig.Matches(r) && !r.dsvReadOnlyDepth; };
+            auto writes = [&](const BindingRecord& r) { return r.mrtOrdinal >= 0 && gSig.Matches(r) && !r.dsvReadOnlyDepth; };
             int inPhase = 0;
             for (size_t i = phases[k].first; i <= phases[k].last; ++i)
                 inPhase += writes(m_window[i]) ? 1 : 0;
@@ -516,6 +523,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
                 gDisc = -1;
             }
         }
+        // The ordinal only identifies the rule outside every-binding mode.
+        const int32_t gOrd = gEvery ? -1 : g->mrtOrdinal;
         int32_t hDisc = -1;
         // Named: unique when the pass is the first pipeline of exactly one binding per frame.
         const int hCount = hNamed ? namedCount : countIn([&](const BindingRecord& r) { return r.hdrOrdinal == h->hdrOrdinal && hSig.Matches(r); });
@@ -553,7 +562,8 @@ void FrameAnalyzer::Analyze(bool forceDump)
             continue;
         }
 
-        if (gSig == m_candGbuffer && g->mrtOrdinal == m_candGbufferOrdinal && gDisc == m_candGbufferDisc &&
+        ++goodFrames;
+        if (gSig == m_candGbuffer && gOrd == m_candGbufferOrdinal && gDisc == m_candGbufferDisc &&
             gEvery == m_candGbufferEvery && hSig == m_candHdr && h->hdrOrdinal == m_candHdrOrdinal && hDisc == m_candHdrDisc &&
             hNamed == m_candHdrNamed)
         {
@@ -562,7 +572,7 @@ void FrameAnalyzer::Analyze(bool forceDump)
         else
         {
             m_candGbuffer = gSig;
-            m_candGbufferOrdinal = g->mrtOrdinal;
+            m_candGbufferOrdinal = gOrd;
             m_candGbufferDisc = gDisc;
             m_candGbufferEvery = gEvery;
             m_candHdr = hSig;
@@ -572,6 +582,9 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_stableCount = 1;
         }
     }
+
+    if (goodFrames > 0)
+        m_missingSince = 0; // the passes were seen: whatever is missing now is a new gap
 
     if (m_stableCount >= m_stableFrames)
     {
@@ -597,30 +610,52 @@ void FrameAnalyzer::Analyze(bool forceDump)
             m_rules.depthClearValue = clearValue;
             m_rules.generation = m_generation.load() + 1;
             m_generation.store(m_rules.generation, std::memory_order_release);
+            const std::string gbufferRule = m_rules.gbufferEvery ? "every G-buffer binding"
+                                            : "list ordinal " + std::to_string(m_rules.gbufferOrdinal) +
+                                                  (m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "");
             if (m_rules.compositeByName)
-                LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (named %s), depth clear %s%.1f",
-                         m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal,
-                         m_rules.gbufferEvery ? ", every parallel list" : m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
-                         m_rules.hdr.ToString().c_str(), PassName(m_rules.compositePass), clearKnown ? "" : "unknown ", clearValue);
+                LOG_INFO("Frame analysis: G-buffer = %s (%s), HDR lighting = %s (named %s), depth clear %s%.1f", m_rules.gbuffer.ToString().c_str(),
+                         gbufferRule.c_str(), m_rules.hdr.ToString().c_str(), PassName(m_rules.compositePass), clearKnown ? "" : "unknown ",
+                         clearValue);
             else
-                LOG_INFO("Frame analysis: G-buffer = %s (list ordinal %d%s), HDR lighting = %s (list ordinal %d%s), depth clear %s%.1f",
-                         m_rules.gbuffer.ToString().c_str(), m_rules.gbufferOrdinal,
-                         m_rules.gbufferEvery ? ", every parallel list" : m_rules.gbufferHdrBefore >= 0 ? ", discriminated" : "",
-                         m_rules.hdr.ToString().c_str(), m_rules.hdrOrdinal, m_rules.hdrMrtBefore >= 0 ? ", discriminated" : "",
-                         clearKnown ? "" : "unknown ", clearValue);
+                LOG_INFO("Frame analysis: G-buffer = %s (%s), HDR lighting = %s (list ordinal %d%s), depth clear %s%.1f",
+                         m_rules.gbuffer.ToString().c_str(), gbufferRule.c_str(), m_rules.hdr.ToString().c_str(), m_rules.hdrOrdinal,
+                         m_rules.hdrMrtBefore >= 0 ? ", discriminated" : "", clearKnown ? "" : "unknown ", clearValue);
         }
         m_status = "armed";
+        m_missingSince = 0;
     }
-    else if (m_rules.armed && (framesWithoutHdr > 0 || ambiguousFrames > 0) && m_stableCount == 0)
+    else if (m_rules.armed && ambiguousFrames > 0 && m_stableCount == 0)
     {
-        // The frame structure changed (menu, loading screen, settings change) or the rules stopped
-        // identifying the passes uniquely: disarm until stable again.
+        // The rules stopped identifying the passes uniquely: injecting could hit the wrong pass.
         m_rules.armed = false;
         m_rules.generation = m_generation.load() + 1;
         m_generation.store(m_rules.generation, std::memory_order_release);
         m_status = "frame structure changed, re-analysing";
-        LOG_INFO("Frame analysis: %s, injection disarmed",
-                 ambiguousFrames > 0 ? "the passes are no longer identified uniquely" : "HDR lighting pass not found any more");
+        LOG_INFO("Frame analysis: the passes are no longer identified uniquely, injection disarmed");
+    }
+    else if (m_rules.armed && framesWithoutHdr > 0 && m_stableCount == 0)
+    {
+        // A pass is missing from recent frames (a loading hitch, a time-of-day or weather change, a
+        // camera cut). The armed rules simply match nothing while it is absent, so they stay: a
+        // disarm would cost StableFrames frames of relighting when it returns (v0.2.0 flickered on and
+        // off). Only a pass missing for kDisarmAfterMissingMs (menus) disarms.
+        const ULONGLONG now = RTSKY_TICK();
+        if (m_missingSince == 0)
+            m_missingSince = now;
+        if (now - m_missingSince >= kDisarmAfterMissingMs)
+        {
+            m_rules.armed = false;
+            m_rules.generation = m_generation.load() + 1;
+            m_generation.store(m_rules.generation, std::memory_order_release);
+            m_status = "frame structure changed, re-analysing";
+            LOG_INFO("Frame analysis: HDR lighting pass not found for %llu ms, injection disarmed",
+                     static_cast<unsigned long long>(now - m_missingSince));
+        }
+        else
+        {
+            m_status = "armed (the lighting pass was missing in recent frames)";
+        }
     }
     else if (!m_rules.armed)
     {
@@ -727,8 +762,10 @@ void FrameAnalyzer::WriteDump(size_t begin, size_t end, const InjectionRules& ru
     }
     fprintf(f, "RTSky frame dump - %zu bindings (execution order)\n", end - begin);
     fprintf(f, "Rules: %s\n", rules.armed ? "armed" : "not armed");
-    fprintf(f, "  G-buffer : %s, list ordinal %d%s\n", rules.gbuffer.ToString().c_str(), rules.gbufferOrdinal,
-            rules.gbufferEvery ? ", Prepare after every parallel list" : "");
+    if (rules.gbufferEvery)
+        fprintf(f, "  G-buffer : %s, Prepare after every G-buffer binding (any list, any ordinal)\n", rules.gbuffer.ToString().c_str());
+    else
+        fprintf(f, "  G-buffer : %s, list ordinal %d\n", rules.gbuffer.ToString().c_str(), rules.gbufferOrdinal);
     fprintf(f, "  Composite: %s, list ordinal %d\n", rules.hdr.ToString().c_str(), rules.hdrOrdinal);
     fprintf(f, "  Depth clear value: %s %.3f\n", rules.depthClearKnown ? "" : "(unknown)", rules.depthClearValue);
     if (!m_ambiguity.empty())
